@@ -19,5 +19,9 @@ class ConcurrentTaskExecutor:
 
 
 # 保持向后兼容的导出名
-SerialTaskExecutor = ConcurrentTaskExecutor
-task_serial_executor = ConcurrentTaskExecutor()
+class SerialTaskExecutor(ConcurrentTaskExecutor):
+    """始终使用单执行槽，兼容旧调用方传入 max_workers 参数。"""
+
+    def __init__(self, max_workers: int | None = None):
+        super().__init__(max_workers=1)
+task_serial_executor = SerialTaskExecutor()

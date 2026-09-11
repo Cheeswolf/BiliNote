@@ -4,6 +4,8 @@ import threading
 import time
 import unittest
 
+import pytest
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "app" / "services" / "task_serial_executor.py"
@@ -37,6 +39,43 @@ class TestTaskSerialExecutor(unittest.TestCase):
             t.join()
 
         self.assertEqual(state["peak_active"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+@pytest.mark.parametrize("mode", ["default", "explicit", "singleton"])
+def test_serial_executor_cannot_be_configured_to_run_concurrently(monkeypatch, mode):
+    monkeypatch.setenv("TASK_MAX_WORKERS", "3")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if mode == "singleton":
+        executor = module.task_serial_executor
+    elif mode == "explicit":
+        executor = module.SerialTaskExecutor(max_workers=3)
+    else:
+        executor = module.SerialTaskExecutor()
+    state = {"active": 0, "peak_active": 0}
+    state_lock = threading.Lock()
+
+    def work():
+        with state_lock:
+            state["active"] += 1
+            state["peak_active"] = max(state["peak_active"], state["active"])
+        time.sleep(0.05)
+        with state_lock:
+            state["active"] -= 1
+
+    threads = [threading.Thread(target=lambda: executor.run(work)) for _ in range(3)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert state["peak_active"] == 1
+    finally:
+        executor.shutdown()
+        module.task_serial_executor.shutdown()
 
 
 if __name__ == "__main__":

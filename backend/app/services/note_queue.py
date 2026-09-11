@@ -11,7 +11,6 @@ from typing import Any, Callable
 from app.db.models.note_batches import BatchStatus, NoteBatch
 from app.db.models.note_jobs import JobStatus, NoteJob
 from app.db.note_queue_dao import (
-    CLAIMABLE_BATCH_STATUSES,
     TERMINAL_JOB_STATUSES,
     claim_next_job,
     update_job_status,
@@ -89,12 +88,8 @@ class NoteQueueService:
                     job.status = JobStatus.INTERRUPTED.value
                     job.updated_at = now
             for batch in session.query(NoteBatch).filter(NoteBatch.id.in_(batch_ids)):
-                if batch.status in CLAIMABLE_BATCH_STATUSES or any(
-                    job.batch_id == batch.id and job.status == JobStatus.INTERRUPTED.value
-                    for job in unfinished
-                ):
-                    batch.status = BatchStatus.RECOVERABLE.value
-                    batch.updated_at = now
+                batch.status = BatchStatus.RECOVERABLE.value
+                batch.updated_at = now
             session.commit()
 
     def run_once(self) -> bool:

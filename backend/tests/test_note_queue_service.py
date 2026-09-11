@@ -111,7 +111,7 @@ def test_recovery_interrupts_running_stages_and_requires_manual_resume(sessions)
     stages = ("PARSING", "DOWNLOADING", "TRANSCRIBING", "SUMMARIZING", "FORMATTING", "SAVING")
     batch_id, ids = add_batch(sessions, statuses=stages + ("PENDING", "SUCCESS", "FAILED", "CANCELLED"), batch_status="RUNNING")
     pending_id, pending_jobs = add_batch(sessions, "pending-only")
-    paused_id, _ = add_batch(sessions, "paused", batch_status="PAUSED")
+    paused_id, paused_jobs = add_batch(sessions, "paused", batch_status="PAUSED")
     complete_id, _ = add_batch(sessions, "complete", statuses=("SUCCESS",), batch_status="COMPLETED")
     seen = []
     service = queue_module.NoteQueueService(sessions, seen.append)
@@ -121,10 +121,11 @@ def test_recovery_interrupts_running_stages_and_requires_manual_resume(sessions)
 
     assert [status for status, _ in job_states(sessions, ids)] == ["INTERRUPTED"] * 6 + ["PENDING", "SUCCESS", "FAILED", "CANCELLED"]
     assert job_states(sessions, pending_jobs) == [("PENDING", None)]
+    assert job_states(sessions, paused_jobs) == [("PENDING", None)]
     with sessions() as session:
         assert session.get(NoteBatch, batch_id).status == "RECOVERABLE"
         assert session.get(NoteBatch, pending_id).status == "RECOVERABLE"
-        assert session.get(NoteBatch, paused_id).status == "PAUSED"
+        assert session.get(NoteBatch, paused_id).status == "RECOVERABLE"
         assert session.get(NoteBatch, complete_id).status == "COMPLETED"
     assert service.run_once() is False
     assert seen == []
