@@ -26,7 +26,7 @@ class NoteJob(Base):
     __table_args__ = (UniqueConstraint("batch_id", "position"),)
 
     task_id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    batch_id = Column(String, ForeignKey("note_batches.id"), nullable=False, index=True)
+    batch_id = Column(String, ForeignKey("note_batches.id"), nullable=True, index=True)
     position = Column(Integer, nullable=False)
     original_url = Column(Text, nullable=False)
     normalized_url = Column(Text, nullable=False)
@@ -35,6 +35,8 @@ class NoteJob(Base):
     status = Column(String, nullable=False, default=JobStatus.PENDING.value)
     attempt = Column(Integer, nullable=False, default=0)
     error_message = Column(Text, nullable=True)
+    settings_json = Column(Text, nullable=True)
+    result_path = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(
         DateTime,

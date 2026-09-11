@@ -85,7 +85,7 @@ class NoteQueueService:
             batch_ids = {job.batch_id for job in unfinished}
             now = datetime.utcnow()
             for job in unfinished:
-                if job.status != JobStatus.PENDING.value:
+                if job.batch_id is None or job.status != JobStatus.PENDING.value:
                     job.status = JobStatus.INTERRUPTED.value
                     job.updated_at = now
             for batch in session.query(NoteBatch).filter(NoteBatch.id.in_(batch_ids)):
@@ -108,19 +108,20 @@ class NoteQueueService:
                         task_id=task_id,
                         attempt=attempt,
                         workspace=TaskWorkspace.for_task(task_id),
-                        settings=json.loads(job.batch.settings_json),
+                        settings=json.loads(job.settings_json if job.batch_id is None else job.batch.settings_json),
                     )
                 except Exception as exc:
                     update_job_status(session, task_id, attempt, JobStatus.FAILED, error_message=str(exc))
                     return True
 
-            status, error = JobStatus.SUCCESS, None
+            status, error, result_path = JobStatus.SUCCESS, None, None
             try:
-                self._runner(context)
+                result_path = self._runner(context)
             except Exception as exc:
                 status, error = JobStatus.FAILED, str(exc)
             with self._session_factory() as session:
-                update_job_status(session, task_id, attempt, status, error_message=error)
+                update_job_status(session, task_id, attempt, status, error_message=error,
+                                  result_path=str(result_path) if result_path is not None else None)
             return True
 
     def _loop(self) -> None:

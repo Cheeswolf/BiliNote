@@ -9,6 +9,9 @@ from starlette.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from app.db.init_db import init_db
+from app.db.engine import SessionLocal
+from app.services.note_queue import NoteQueueService
+from app.routers.note import run_queued_note
 from app.db.provider_dao import seed_default_providers
 from app.exceptions.exception_handlers import register_exception_handlers
 # from app.db.model_dao import init_model_table
@@ -72,7 +75,14 @@ async def lifespan(app: FastAPI):
         logger.exception("[startup FAILED] 后端启动期异常，详见堆栈；容器会退出并由 restart 策略决定是否重试")
         raise
 
-    yield
+    queue = NoteQueueService(SessionLocal, lambda context: run_queued_note(context, SessionLocal))
+    app.state.note_queue = queue
+    try:
+        # start() performs recovery before starting its sole worker thread.
+        queue.start()
+        yield
+    finally:
+        queue.stop()
 
 app = create_app(lifespan=lifespan)
 

@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Optional, Callable
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel, validator, field_validator
 from dataclasses import asdict
 
-from app.db.video_task_dao import get_task_by_video
+from app.db.engine import get_db
+from app.db.models.note_jobs import JobStatus, NoteJob
+from app.db.note_queue_dao import JobRetryConflict, enqueue_single_job, update_job_status
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
@@ -189,6 +191,25 @@ def execute_note_job(
     return result_path
 
 
+def run_queued_note(context, session_factory):
+    """Adapt persisted jobs to the note pipeline and persist stage callbacks."""
+    with session_factory() as session:
+        job = session.get(NoteJob, context.task_id)
+        settings = {**context.settings, "video_url": job.normalized_url,
+                    "platform": job.platform, "task_id": context.task_id}
+    request = VideoRequest(**settings)
+
+    def report(status, message=""):
+        # The queue owns terminal completion after execute_note_job returns.
+        if status in (TaskStatus.SUCCESS, TaskStatus.FAILED):
+            return
+        with session_factory() as session:
+            update_job_status(session, context.task_id, context.attempt,
+                              JobStatus(status.value), error_message=message or None)
+
+    return execute_note_job(request, status_callback=report, workspace=context.workspace)
+
+
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                   link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                   _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
@@ -226,7 +247,7 @@ async def upload(file: UploadFile = File(...)):
 
 
 @router.post("/generate_note")
-def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+def generate_note(data: VideoRequest, request: Request, session=Depends(get_db)):
     try:
         # 就绪门禁：本地转写引擎（fast-whisper / mlx-whisper）必须等模型下载完才能跑视频，
         # 否则任务会卡在首次下载（慢 / OOM / 截断），用户只看到一个静默失败的任务。
@@ -247,43 +268,38 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                     },
                 )
 
-        video_id = extract_video_id(data.video_url, data.platform)
-        # if not video_id:
-        #     raise HTTPException(status_code=400, detail="无法提取视频 ID")
-        # existing = get_task_by_video(video_id, data.platform)
-        # if existing:
-        #     return R.error(
-        #         msg='笔记已生成，请勿重复发起',
-        #
-        #     )
-        if data.task_id:
-            # 如果传了task_id，说明是重试！
-            task_id = data.task_id
-            logger.info(f"重试模式，复用已有 task_id={task_id}")
-        else:
-            # 正常新建任务
-            task_id = str(uuid.uuid4())
-
-        # 统一先写入 PENDING，表示已进入队列等待串行执行
-        NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
-
-        # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
+        task_id = data.task_id or str(uuid.uuid4())
+        workspace = TaskWorkspace.for_task(task_id)
+        settings = data.model_dump(mode="json", exclude={"task_id", "prefetched_transcript"})
+        prepare = None
         if data.prefetched_transcript:
-            try:
-                _persist_prefetched_transcript(task_id, data.prefetched_transcript)
-            except Exception as e:
-                logger.warning(f"写入预取字幕失败 (task_id={task_id}): {e}")
-
-        background_tasks.add_task(run_note_task, task_id, data.video_url, data.platform, data.quality, data.link,
-                                  data.screenshot, data.model_name, data.provider_id, data.format, data.style,
-                                  data.extras, data.video_understanding, data.video_interval, data.grid_size)
+            prepare = lambda: _persist_prefetched_transcript(task_id, data.prefetched_transcript, workspace)
+        enqueue_single_job(session, task_id, settings, prepare=prepare)
+        request.app.state.note_queue.wake()
         return R.success({"task_id": task_id})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except JobRetryConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 
 @router.get("/task_status/{task_id}")
-def get_task_status(task_id: str):
+def get_task_status(task_id: str, session=Depends(get_db)):
+    job = session.get(NoteJob, task_id)
+    if job is not None:
+        data = {"status": job.status, "message": job.error_message or "", "task_id": task_id}
+        if job.status == JobStatus.SUCCESS.value:
+            result_path = Path(job.result_path) if job.result_path else TaskWorkspace.for_task(task_id).result
+            if result_path.is_file():
+                with result_path.open(encoding="utf-8") as stream:
+                    data["result"] = json.load(stream)
+            else:
+                data["message"] = "任务完成，但结果文件未找到"
+        return R.success(data)
+
     status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
     result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
 

@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
 
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.db.models.note_batches import BatchStatus, NoteBatch
@@ -61,6 +62,53 @@ def create_batch(session, request_id, name, source_label, settings, items):
         return session.query(NoteBatch).filter(NoteBatch.request_id == request_id).one()
 
 
+class JobRetryConflict(ValueError):
+    """Only failed or interrupted standalone jobs may be retried."""
+
+
+def enqueue_single_job(session, task_id, settings, prepare=None):
+    """Commit only after task inputs exist; conditional retry reserves the attempt.
+
+    prepare runs while the transaction owns its write lock so two requests cannot
+    both overwrite a retry workspace. The worker never sees a half-ready job.
+    """
+    snapshot = sanitize_settings(settings)
+    values = dict(
+        original_url=snapshot["video_url"], normalized_url=snapshot["video_url"],
+        platform=snapshot["platform"],
+        resource_key=f"{snapshot['platform']}:{snapshot['video_url']}",
+        settings_json=json.dumps(snapshot, ensure_ascii=False),
+        status=JobStatus.PENDING.value, error_message=None, result_path=None,
+        updated_at=datetime.utcnow(),
+    )
+    try:
+        job = session.get(NoteJob, task_id)
+        if job is None:
+            job = NoteJob(task_id=task_id, batch_id=None, position=0, **values)
+            session.add(job)
+            session.flush()
+        else:
+            changed = session.query(NoteJob).filter(
+                NoteJob.task_id == task_id,
+                NoteJob.batch_id.is_(None),
+                NoteJob.attempt == job.attempt,
+                NoteJob.status.in_([JobStatus.FAILED.value, JobStatus.INTERRUPTED.value]),
+            ).update({**values, "attempt": job.attempt + 1}, synchronize_session=False)
+            if changed != 1:
+                raise JobRetryConflict("Only failed or interrupted standalone tasks can be retried")
+        if prepare is not None:
+            prepare()
+        session.commit()
+        session.expire_all()
+        return session.get(NoteJob, task_id)
+    except IntegrityError as exc:
+        session.rollback()
+        raise JobRetryConflict("Task already exists") from exc
+    except Exception:
+        session.rollback()
+        raise
+
+
 def get_batch_detail(session, batch_id):
     batch = session.query(NoteBatch).filter(NoteBatch.id == batch_id).one()
     jobs = (
@@ -77,7 +125,7 @@ def claim_next_job(session):
         active_job = (
             session.query(NoteJob.task_id)
             .filter(
-                NoteJob.status != JobStatus.PENDING.value,
+                NoteJob.status.notin_([JobStatus.PENDING.value, JobStatus.INTERRUPTED.value]),
                 NoteJob.status.notin_(TERMINAL_JOB_STATUSES),
             )
             .first()
@@ -88,14 +136,14 @@ def claim_next_job(session):
 
         job = (
             session.query(NoteJob)
-            .join(NoteBatch)
+            .outerjoin(NoteBatch)
             .filter(
                 NoteJob.status == JobStatus.PENDING.value,
-                NoteBatch.status.in_(CLAIMABLE_BATCH_STATUSES),
+                or_(NoteJob.batch_id.is_(None), NoteBatch.status.in_(CLAIMABLE_BATCH_STATUSES)),
             )
             .order_by(
-                NoteBatch.created_at,
-                NoteBatch.id,
+                func.coalesce(NoteBatch.created_at, NoteJob.created_at),
+                func.coalesce(NoteBatch.id, NoteJob.task_id),
                 NoteJob.position,
                 NoteJob.task_id,
             )
@@ -133,6 +181,7 @@ def update_job_status(
     status: JobStatus,
     *,
     error_message: str | None = None,
+    result_path: str | None = None,
 ) -> bool:
     changed = (
         session.query(NoteJob)
@@ -144,6 +193,7 @@ def update_job_status(
             {
                 "status": status.value,
                 "error_message": error_message,
+                **({"result_path": result_path} if result_path is not None else {}),
                 "updated_at": datetime.utcnow(),
             }
         )
