@@ -123,6 +123,8 @@ class NoteGenerator:
         :param grid_size: 生成缩略图时的网格大小，如 [3, 3]
         :return: NoteResult 对象，包含 markdown 文本、转写结果和音频元信息
         """
+        if workspace is not None and workspace.task_id != task_id:
+            raise ValueError("workspace does not belong to task_id")
         self._status_callback = status_callback
         self.workspace = workspace or TaskWorkspace.for_task(task_id or str(uuid.uuid4()))
         self.video_path = None
@@ -336,7 +338,8 @@ class NoteGenerator:
         if handler is not None:
             handler(status, message)
 
-    def _update_status(self, task_id: Optional[str], status: Union[str, TaskStatus], message: Optional[str] = None):
+    @staticmethod
+    def _update_status(task_id: Optional[str], status: Union[str, TaskStatus], message: Optional[str] = None):
         """
         创建或更新 {task_id}.status.json，记录当前任务状态
 
@@ -526,8 +529,6 @@ class NoteGenerator:
         :param task_id: 任务 ID
         :return: TranscriptResult 对象
         """
-        self._report(task_id, status_phase)
-
         # 已有缓存，直接返回
         if transcript_cache_file.exists():
             logger.info(f"检测到转写缓存 ({transcript_cache_file})，尝试读取")
@@ -592,6 +593,7 @@ class NoteGenerator:
 
         # 调用转写器
         try:
+            self._report(task_id, status_phase)
             logger.info("开始转写音频")
             if self.transcriber is None:
                 self.transcriber = self._init_transcriber()

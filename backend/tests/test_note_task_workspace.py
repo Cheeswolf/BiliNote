@@ -224,3 +224,42 @@ def test_both_subtitle_attempts_use_task_media_directory(pipeline, tmp_path):
     result = note_service.NoteGenerator().generate('video', 'local', task_id='subtitles', workspace=workspace)
     assert result is not None
     assert outputs == [str(workspace.media), str(workspace.media)]
+
+
+@pytest.mark.parametrize('entrypoint', ['generator', 'runner'])
+def test_workspace_owner_mismatch_is_rejected_before_any_write(pipeline, tmp_path, monkeypatch, entrypoint):
+    from app.routers import note as note_router
+    workspace = workspace_for('task-b', tmp_path)
+    monkeypatch.setattr(note_router, 'NOTE_OUTPUT_DIR', str(tmp_path / 'legacy'))
+    events = []
+    callback = lambda status, message: events.append(status)
+    with pytest.raises(ValueError, match='workspace.*task'):
+        if entrypoint == 'generator':
+            note_service.NoteGenerator().generate('video', 'local', task_id='task-a', workspace=workspace,
+                                                  status_callback=callback)
+        else:
+            request = note_router.VideoRequest(video_url='video', platform='local', quality='medium',
+                task_id='task-a', model_name='model', provider_id='provider', prefetched_transcript={
+                    'segments': [{'start': 0, 'end': 1, 'text': 'must not write'}]})
+            note_router.execute_note_job(request, callback, workspace)
+    assert not workspace.root.exists()
+    assert not (tmp_path / 'legacy').exists()
+    assert events == []
+    assert pipeline.downloads == []
+
+
+def test_second_subtitle_success_does_not_report_transcribing(pipeline, tmp_path):
+    calls = []
+    def subtitles(url, output_dir=None):
+        calls.append(url)
+        return pipeline.transcript if len(calls) == 2 else None
+    pipeline.downloader.download_subtitles = subtitles
+    events = []
+    result = note_service.NoteGenerator().generate('video', 'local', task_id='second-subtitle',
+        workspace=workspace_for('second-subtitle', tmp_path),
+        status_callback=lambda status, message: events.append(status))
+    assert result.transcript.full_text == 'lesson'
+    assert pipeline.init_calls == []
+    assert TaskStatus.TRANSCRIBING not in events
+    assert events == [TaskStatus.PARSING, TaskStatus.DOWNLOADING, TaskStatus.SUMMARIZING,
+                      TaskStatus.FORMATTING, TaskStatus.SAVING]

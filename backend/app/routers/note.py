@@ -141,7 +141,8 @@ def execute_note_job(
     task_id = request.task_id
     if not task_id:
         raise ValueError("task_id is required")
-    generator = NoteGenerator()
+    if workspace is not None and workspace.task_id != task_id:
+        raise ValueError("workspace does not belong to task_id")
     failed_reported = False
 
     def report(status, message=""):
@@ -152,6 +153,7 @@ def execute_note_job(
             status_callback(status, message)
 
     try:
+        generator = NoteGenerator()
         if not request.model_name or not request.provider_id:
             raise HTTPException(status_code=400, detail="请选择模型和提供者")
         if request.prefetched_transcript:
@@ -174,7 +176,8 @@ def execute_note_job(
             result_path = save_note_to_file(task_id, note)
     except Exception as exc:
         if not failed_reported:
-            generator._report(task_id, TaskStatus.FAILED, str(exc), callback=report)
+            NoteGenerator._update_status(task_id, TaskStatus.FAILED, str(exc))
+            report(TaskStatus.FAILED, str(exc))
         raise
 
     generator._report(task_id, TaskStatus.SUCCESS, callback=report)

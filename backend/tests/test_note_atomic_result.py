@@ -119,3 +119,19 @@ def test_legacy_runner_marks_success_only_after_save(runner, tmp_path, monkeypat
     status = tmp_path / 'task.status.json'
     assert status.exists() and json.loads(status.read_text())['status'] == 'FAILED'
     assert 'index' not in runner
+
+
+def test_constructor_failure_reports_failed_to_status_file_and_callback(runner, tmp_path, monkeypatch):
+    def fail_init(self):
+        raise RuntimeError('transcriber config unavailable')
+    monkeypatch.setattr(note_service.NoteGenerator, '__init__', fail_init)
+    events = []
+    request = note_router.VideoRequest(video_url='local.mp4', platform='local', quality='medium',
+        task_id='constructor', model_name='model', provider_id='provider')
+    with pytest.raises(RuntimeError, match='transcriber config unavailable'):
+        note_router.execute_note_job(request, lambda status, message: events.append((status, message)))
+    assert events == [(TaskStatus.FAILED, 'transcriber config unavailable')]
+    assert json.loads((tmp_path / 'constructor.status.json').read_text()) == {
+        'status': 'FAILED', 'message': 'transcriber config unavailable'}
+    assert not (tmp_path / 'constructor.json').exists()
+    assert 'index' not in runner

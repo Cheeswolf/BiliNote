@@ -15,6 +15,11 @@ class TaskWorkspace:
         return cls(Path(root) / task_id)
 
     @property
+    def task_id(self) -> str:
+        """The task directory is the authoritative workspace owner."""
+        return self.root.name
+
+    @property
     def media(self) -> Path:
         return self.root / "media"
 
@@ -36,4 +41,4 @@ class TaskWorkspace:
 
     @property
     def result(self) -> Path:
-        return self.root / f"{self.root.name}.json"
+        return self.root / f"{self.task_id}.json"
