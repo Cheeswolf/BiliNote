@@ -407,3 +407,52 @@ def test_preview_malformed_url_does_not_drop_valid_neighbor(api):
     assert len(rows) == 2
     assert rows[0]['valid'] is False and rows[0]['error']
     assert rows[1]['valid'] is True
+
+
+@pytest.mark.parametrize('literal', ['1e400', 'Infinity', '-1', 'NaN'])
+def test_submit_rejects_invalid_duration_before_persistence(api, literal):
+    body = json.dumps(payload(items=[dict(item(), duration='DURATION')])).replace('"DURATION"', literal)
+    response = api.client.post('/api/batch/submit', content=body,
+                               headers={'content-type': 'application/json'})
+    assert response.status_code == 422
+    errors = response.json()['detail']
+    assert errors[0]['loc'] == ['body', 'items', 0, 'duration']
+    assert set(errors[0]) == {'loc', 'type', 'msg'}
+    json.dumps(response.json(), allow_nan=False)
+    with api.sessions() as session:
+        assert session.query(NoteBatch).count() == session.query(NoteJob).count() == 0
+    assert not api.queue._wake.is_set()
+
+
+@pytest.mark.parametrize('duration', [float('inf'), float('nan'), -1.0])
+def test_preview_item_model_rejects_invalid_duration(duration):
+    from pydantic import ValidationError
+    from app.models.batch_models import BatchPreviewItem
+    with pytest.raises(ValidationError):
+        BatchPreviewItem(**item(), duration=duration)
+
+
+@pytest.mark.parametrize('grid_size', [[2], [0, 2], [-1, 2], [1, 2, 3]])
+def test_submit_rejects_invalid_grid_size_before_persistence(api, grid_size):
+    body = payload()
+    body['settings']['grid_size'] = grid_size
+    response = api.client.post('/api/batch/submit', json=body)
+    assert response.status_code == 422
+    with api.sessions() as session:
+        assert session.query(NoteBatch).count() == session.query(NoteJob).count() == 0
+    assert not api.queue._wake.is_set()
+
+
+@pytest.mark.parametrize('duration, grid_size', [(None, []), (0.0, [1, 2]), (12.5, [2, 2])])
+def test_submit_valid_duration_and_grid_size_keep_detail_serializable(api, duration, grid_size):
+    body = payload(items=[dict(item(), duration=duration)])
+    body['settings']['grid_size'] = grid_size
+    response = api.client.post('/api/batch/submit', json=body)
+    assert response.status_code == 200
+    detail = api.client.get('/api/batch/' + response.json()['data']['batch_id'])
+    assert detail.status_code == 200
+    assert detail.json()['data']['jobs'][0]['duration'] == duration
+    json.dumps(detail.json(), allow_nan=False)
+    with api.sessions() as session:
+        batch = session.query(NoteBatch).one()
+        assert json.loads(batch.settings_json)['grid_size'] == grid_size

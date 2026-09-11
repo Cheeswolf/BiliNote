@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from app.db.models.note_batches import BatchStatus
 from app.db.models.note_jobs import JobStatus
@@ -27,7 +27,7 @@ class BatchPreviewItem(StrictRequest):
     resource_key: str = ''
     title: str | None = None
     cover_url: str | None = None
-    duration: float | None = None
+    duration: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     valid: bool = True
     error: str | None = None
 
@@ -43,7 +43,14 @@ class BatchSettings(StrictRequest):
     extras: str | None = None
     video_understanding: bool = False
     video_interval: int = Field(default=0, ge=0)
-    grid_size: list[int] = Field(default_factory=list)
+    grid_size: list[Annotated[int, Field(gt=0)]] = Field(default_factory=list)
+
+    @field_validator('grid_size')
+    @classmethod
+    def validate_grid_size(cls, value):
+        if len(value) not in (0, 2):
+            raise ValueError('grid_size must be empty or contain exactly two positive integers')
+        return value
 
 
 class BatchSubmitRequest(StrictRequest):

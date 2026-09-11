@@ -3,6 +3,8 @@
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 
 from app.db.engine import get_db
 from app.db.note_queue_dao import (
@@ -14,7 +16,24 @@ from app.models.batch_models import (
 from app.services.batch_preview import normalize_video_url, preview_batch
 from app.utils.response import ResponseWrapper as R
 
-router = APIRouter()
+
+class BatchRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def validated_handler(request):
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                # Raw inf/NaN inputs are not JSON serializable, even in a 422.
+                errors = [{key: error[key] for key in ('loc', 'type', 'msg')}
+                          for error in exc.errors()]
+                raise HTTPException(status_code=422, detail=errors) from exc
+
+        return validated_handler
+
+
+router = APIRouter(route_class=BatchRoute)
 
 
 def _summary(batch, counts):
