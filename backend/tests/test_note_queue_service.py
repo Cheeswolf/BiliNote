@@ -78,7 +78,7 @@ def test_failure_is_persisted_and_next_job_runs(sessions):
     assert job_states(sessions, ids) == [("SUCCESS", None), ("FAILED", "download failed"), ("SUCCESS", None)]
     assert seen[0].attempt == 0
     assert seen[0].settings == {"model_name": "demo"}
-    assert seen[0].workspace == Path("data/tasks") / ids[0]
+    assert seen[0].workspace.root == Path("data/tasks") / ids[0]
     assert len({context.workspace for context in seen}) == 3
 
 

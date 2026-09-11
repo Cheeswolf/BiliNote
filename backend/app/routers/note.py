@@ -3,7 +3,7 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
@@ -15,6 +15,8 @@ from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
 from app.services.note import NoteGenerator, logger
+from app.services.task_workspace import TaskWorkspace
+from app.models.notes_model import NoteResult
 from app.services.task_serial_executor import task_serial_executor
 from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id
@@ -45,7 +47,7 @@ class VideoRequest(BaseModel):
     provider_id: str
     task_id: Optional[str] = None
     format: Optional[list] = []
-    style: str = None
+    style: Optional[str] = None
     extras: Optional[str]=None
     video_understanding: Optional[bool] = False
     video_interval: Optional[int] = 0
@@ -72,13 +74,27 @@ NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
 UPLOAD_DIR = "uploads"
 
 
-def save_note_to_file(task_id: str, note):
-    os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
-    with open(os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json"), "w", encoding="utf-8") as f:
-        json.dump(asdict(note), f, ensure_ascii=False, indent=2)
+def atomic_save_note(task_id: str, note: NoteResult, target: Path) -> Path:
+    """Publish a complete result only after its temporary file is flushed to disk."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f"{task_id}.json.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(asdict(note), stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
 
 
-def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
+def save_note_to_file(task_id: str, note: NoteResult) -> Path:
+    return atomic_save_note(task_id, note, Path(NOTE_OUTPUT_DIR) / f"{task_id}.json")
+
+
+def _persist_prefetched_transcript(task_id: str, transcript: dict, workspace: Optional[TaskWorkspace] = None) -> None:
     """把客户端预取的字幕写到 NoteGenerator 期望的转写缓存文件里。
 
     NoteGenerator.generate 会优先读 <task_id>_transcript.json，命中即跳过 download_subtitles
@@ -105,54 +121,83 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
         "segments": cleaned_segments,
     }
 
-    os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
-    target = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_transcript.json")
+    target = workspace.transcript if workspace else Path(NOTE_OUTPUT_DIR) / f"{task_id}_transcript.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
     with open(target, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
 
 
-def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
-                  link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
-                  _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-                  video_interval=0, grid_size=[]
-                  ):
+def execute_note_job(
+    request: VideoRequest,
+    status_callback: Optional[Callable[[TaskStatus, str], None]] = None,
+    workspace: Optional[TaskWorkspace] = None,
+) -> Path:
+    """Generate and durably save a job before reporting SUCCESS.
 
-    if not model_name or not provider_id:
-        raise HTTPException(status_code=400, detail="请选择模型和提供者")
+    The caller owns scheduling; legacy polling and indexing retain their
+    note_results projection until all readers support workspace results.
+    """
+    task_id = request.task_id
+    if not task_id:
+        raise ValueError("task_id is required")
+    generator = NoteGenerator()
+    failed_reported = False
 
-    def _execute_note_task():
-        return NoteGenerator().generate(
-            video_url=video_url,
-            platform=platform,
-            quality=quality,
-            task_id=task_id,
-            model_name=model_name,
-            provider_id=provider_id,
-            link=link,
-            _format=_format,
-            style=style,
-            extras=extras,
-            screenshot=screenshot,
-            video_understanding=video_understanding,
-            video_interval=video_interval,
-            grid_size=grid_size,
+    def report(status, message=""):
+        nonlocal failed_reported
+        if status == TaskStatus.FAILED:
+            failed_reported = True
+        if status_callback is not None:
+            status_callback(status, message)
+
+    try:
+        if not request.model_name or not request.provider_id:
+            raise HTTPException(status_code=400, detail="请选择模型和提供者")
+        if request.prefetched_transcript:
+            _persist_prefetched_transcript(task_id, request.prefetched_transcript, workspace)
+        note = generator.generate(
+            video_url=request.video_url, platform=request.platform, quality=request.quality,
+            task_id=task_id, model_name=request.model_name, provider_id=request.provider_id,
+            link=request.link, _format=request.format, style=request.style, extras=request.extras,
+            screenshot=request.screenshot, video_understanding=request.video_understanding,
+            video_interval=request.video_interval, grid_size=request.grid_size,
+            workspace=workspace, status_callback=report,
         )
+        if not note or not note.markdown:
+            raise RuntimeError("Note generation returned no markdown")
+        generator._report(task_id, TaskStatus.SAVING, callback=report)
+        if workspace is not None:
+            result_path = atomic_save_note(task_id, note, workspace.result)
+            save_note_to_file(task_id, note)
+        else:
+            result_path = save_note_to_file(task_id, note)
+    except Exception as exc:
+        if not failed_reported:
+            generator._report(task_id, TaskStatus.FAILED, str(exc), callback=report)
+        raise
 
-    logger.info(f"任务进入执行队列 (task_id={task_id})")
-    note = task_serial_executor.run(_execute_note_task)
-    logger.info(f"Note generated: {task_id}")
-    if not note or not note.markdown:
-        logger.warning(f"任务 {task_id} 执行失败，跳过保存")
-        return
-    save_note_to_file(task_id, note)
-
-    # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
+    generator._report(task_id, TaskStatus.SUCCESS, callback=report)
     try:
         from app.services.vector_store import VectorStoreManager
         VectorStoreManager().index_task(task_id)
-    except Exception as e:
-        logger.warning(f"向量索引失败（不影响笔记）: {e}")
+    except Exception as exc:
+        logger.warning(f"向量索引失败（不影响笔记）: {exc}")
+    return result_path
+
+
+def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
+                  link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
+                  _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
+                  video_interval=0, grid_size=None):
+    request = VideoRequest(
+        task_id=task_id, video_url=video_url, platform=platform, quality=quality,
+        link=link, screenshot=screenshot, model_name=model_name, provider_id=provider_id,
+        format=_format, style=style, extras=extras, video_understanding=video_understanding,
+        video_interval=video_interval, grid_size=grid_size,
+    )
+    logger.info(f"任务进入执行队列 (task_id={task_id})")
+    return task_serial_executor.run(lambda: execute_note_job(request))
 
 
 @router.post('/delete_task')

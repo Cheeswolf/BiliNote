@@ -5,7 +5,6 @@ import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable
 
 from app.db.models.note_batches import BatchStatus, NoteBatch
@@ -15,6 +14,8 @@ from app.db.note_queue_dao import (
     claim_next_job,
     update_job_status,
 )
+
+from app.services.task_workspace import TaskWorkspace
 
 logger = logging.getLogger(__name__)
 _execution_lock = threading.Lock()
@@ -26,7 +27,7 @@ _active_worker: threading.Thread | None = None
 class QueueJobContext:
     task_id: str
     attempt: int
-    workspace: Path
+    workspace: TaskWorkspace
     settings: dict[str, Any]
 
 
@@ -106,7 +107,7 @@ class NoteQueueService:
                     context = QueueJobContext(
                         task_id=task_id,
                         attempt=attempt,
-                        workspace=Path("data/tasks") / task_id,
+                        workspace=TaskWorkspace.for_task(task_id),
                         settings=json.loads(job.batch.settings_json),
                     )
                 except Exception as exc:

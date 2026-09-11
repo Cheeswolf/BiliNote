@@ -118,8 +118,11 @@ class LocalDownloader(Downloader, ABC):
         file_name = os.path.basename(video_url)
         title, _ = os.path.splitext(file_name)
         print(title, file_name,video_url)
-        file_path=self.convert_to_mp3(video_url)
-        cover_path = self.extract_cover(video_url)
+        if output_dir is not None:
+            os.makedirs(output_dir, exist_ok=True)
+        audio_output = os.path.join(output_dir, title + ".mp3") if output_dir is not None else None
+        file_path = self.convert_to_mp3(video_url, audio_output)
+        cover_path = self.extract_cover(video_url, output_dir)
         cover_url = save_cover_to_static(cover_path)
 
         print('file——path',file_path)

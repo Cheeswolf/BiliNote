@@ -60,10 +60,18 @@ def save_cover_to_static(local_cover_path: str, subfolder: Optional[str] = "cove
     os.makedirs(target_dir, exist_ok=True)
 
     # 拷贝文件
-    file_name = os.path.basename(local_cover_path)
+    file_name = f"{uuid.uuid4().hex}_{os.path.basename(local_cover_path)}"
     target_path = os.path.join(target_dir, file_name)
     shutil.copy2(local_cover_path, target_path)  # 保留原时间戳、权限
     image_relative_path = f"/static/{subfolder}/{file_name}".replace("\\", "/")
     url_path = f"{BACKEND_BASE_URL.rstrip('/')}/{image_relative_path.lstrip('/')}"
     # 返回前端可访问的路径
     return url_path
+
+
+def publish_screenshot(source: str | Path, output_dir: Path) -> Path:
+    """Publish a task-owned screenshot into its browser-visible static folder."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / Path(source).name
+    shutil.copy2(source, target)
+    return target
