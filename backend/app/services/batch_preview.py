@@ -12,6 +12,26 @@ from app.utils.url_parser import (
 
 
 SUPPORTED_PLATFORMS = {"bilibili", "youtube", "douyin", "kuaishou"}
+TRACKING_QUERY_KEYS = {
+    "from",
+    "from_source",
+    "from_spmid",
+    "refer",
+    "share_medium",
+    "share_plat",
+    "share_session_id",
+    "share_source",
+    "source",
+    "spm",
+    "timestamp",
+    "unique_k",
+    "utm_campaign",
+    "utm_content",
+    "utm_medium",
+    "utm_source",
+    "utm_term",
+    "vd_source",
+}
 
 
 @dataclass(frozen=True)
@@ -55,7 +75,9 @@ def normalize_video_url(url: str, platform: str | None = None) -> PreviewItem:
             candidate = _with_bilibili_page(candidate, short_page)
             parsed = urlparse(candidate)
 
-    detected_platform = platform if platform in SUPPORTED_PLATFORMS else _detect_platform(parsed)
+    detected_platform = _detect_platform(parsed)
+    if platform in SUPPORTED_PLATFORMS and platform != detected_platform:
+        return _invalid_item(original_url, "暂不支持该视频平台或链接格式无效")
     if detected_platform is None:
         return _invalid_item(original_url, "暂不支持该视频平台或链接格式无效")
 
@@ -153,9 +175,9 @@ def _detect_platform(parsed) -> Optional[str]:
         or path.startswith("/shorts/")
     ):
         return "youtube"
-    if "douyin" in hostname:
+    if _matches_domain(hostname, "douyin.com"):
         return "douyin"
-    if "kuaishou" in hostname:
+    if _matches_domain(hostname, "kuaishou.com"):
         return "kuaishou"
     return None
 
@@ -167,11 +189,12 @@ def _normalize_url(parsed, platform: str) -> str:
         hostname = "www.bilibili.com"
         page = extract_bilibili_p_number(urlunparse(parsed), resolve_short_url=False)
         path = re.sub(r"/p\d+$", "", path)
-        query = [("p", str(page))] if page is not None else []
+        query = _canonical_query(parsed, "p", str(page) if page is not None else None)
     elif platform == "youtube":
-        query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key == "v"]
+        video_id = next((value for key, value in parse_qsl(parsed.query) if key == "v"), None)
+        query = _canonical_query(parsed, "v", video_id)
     else:
-        query = []
+        query = _non_tracking_query(parsed)
     return urlunparse(("https", hostname, path, "", urlencode(query), ""))
 
 
@@ -181,7 +204,38 @@ def _resource_key(normalized_url: str, platform: str) -> str:
     video_id = extract_video_id(normalized_url, platform)
     if video_id:
         return f"{platform}:{video_id}"
-    return f"{platform}:{normalized_url}"
+    labels = {
+        "youtube": "YouTube",
+        "douyin": "抖音",
+        "kuaishou": "快手",
+    }
+    raise ValueError(f"无法识别 {labels[platform]} 视频 ID")
+
+
+def _matches_domain(hostname: str, domain: str) -> bool:
+    return hostname == domain or hostname.endswith(f".{domain}")
+
+
+def _canonical_query(parsed, key: str, value: Optional[str]) -> list[tuple[str, str]]:
+    retained = [
+        (query_key, query_value)
+        for query_key, query_value in _non_tracking_query(parsed)
+        if query_key != key
+    ]
+    return [(key, value)] + retained if value is not None else retained
+
+
+def _non_tracking_query(parsed) -> list[tuple[str, str]]:
+    return [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if not _is_tracking_query(key)
+    ]
+
+
+def _is_tracking_query(key: str) -> bool:
+    normalized = key.lower()
+    return normalized in TRACKING_QUERY_KEYS or normalized.startswith(("spm_", "utm_"))
 
 
 def _with_bilibili_page(url: str, page: int) -> str:

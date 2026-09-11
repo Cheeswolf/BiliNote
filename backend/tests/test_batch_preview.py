@@ -1,34 +1,73 @@
+import importlib
 import pathlib
 import sys
 import types
 
+import pytest
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-for module_name in list(sys.modules):
-    if module_name == "app" or module_name.startswith("app."):
-        del sys.modules[module_name]
-
-app_package = types.ModuleType("app")
-app_package.__path__ = [str(ROOT / "app")]
-sys.modules["app"] = app_package
-
-yt_dlp = types.ModuleType("yt_dlp")
-yt_dlp.YoutubeDL = None
-sys.modules.setdefault("yt_dlp", yt_dlp)
-
-subtitle_module = types.ModuleType("app.downloaders.bilibili_subtitle")
-subtitle_module.BilibiliSubtitleFetcher = object
-sys.modules["app.downloaders.bilibili_subtitle"] = subtitle_module
 
 
-from app.downloaders.bilibili_downloader import BilibiliDownloader, BilibiliPart
-from app.services.batch_preview import normalize_video_url, preview_batch
+@pytest.fixture
+def preview_api(monkeypatch):
+    """Load preview modules in a test-local app package and restore sys.modules."""
+    tracked_names = [
+        name for name in sys.modules
+        if name == "app" or name.startswith("app.") or name == "yt_dlp" or name.startswith("yt_dlp.")
+    ]
+    original_modules = {name: sys.modules[name] for name in tracked_names}
+
+    for name in tracked_names:
+        del sys.modules[name]
+
+    app_package = types.ModuleType("app")
+    app_package.__path__ = [str(ROOT / "app")]
+    sys.modules["app"] = app_package
+
+    yt_dlp = types.ModuleType("yt_dlp")
+    yt_dlp.__path__ = []
+    yt_dlp.YoutubeDL = None
+    sys.modules["yt_dlp"] = yt_dlp
+
+    extractor_module = types.ModuleType("yt_dlp.extractor")
+    bilibili_module = types.ModuleType("yt_dlp.extractor.bilibili")
+
+    class BilibiliBaseIE:
+        def _download_playinfo(self, *args, **kwargs):
+            return None
+
+    bilibili_module.BilibiliBaseIE = BilibiliBaseIE
+    sys.modules["yt_dlp.extractor"] = extractor_module
+    sys.modules["yt_dlp.extractor.bilibili"] = bilibili_module
+
+    subtitle_module = types.ModuleType("app.downloaders.bilibili_subtitle")
+    subtitle_module.BilibiliSubtitleFetcher = object
+    sys.modules["app.downloaders.bilibili_subtitle"] = subtitle_module
+
+    sys.path.insert(0, str(ROOT))
+    try:
+        downloader_module = importlib.import_module("app.downloaders.bilibili_downloader")
+        preview_module = importlib.import_module("app.services.batch_preview")
+        monkeypatch.setattr(
+            downloader_module,
+            "CookieConfigManager",
+            lambda: types.SimpleNamespace(get=lambda platform: None),
+        )
+        yield types.SimpleNamespace(
+            downloader_module=downloader_module,
+            preview_module=preview_module,
+        )
+    finally:
+        sys.path.remove(str(ROOT))
+        for name in list(sys.modules):
+            if name == "app" or name.startswith("app.") or name == "yt_dlp" or name.startswith("yt_dlp."):
+                del sys.modules[name]
+        sys.modules.update(original_modules)
 
 
-def test_bilibili_resource_key_keeps_part_and_drops_tracking():
-    item = normalize_video_url(
+def test_bilibili_resource_key_keeps_part_and_drops_tracking(preview_api):
+    item = preview_api.preview_module.normalize_video_url(
         "https://www.bilibili.com/video/BV1abc/?p=2&spm_id_from=333"
     )
 
@@ -36,34 +75,79 @@ def test_bilibili_resource_key_keeps_part_and_drops_tracking():
     assert item.resource_key == "bilibili:BV1abc:p2"
 
 
-def test_bilibili_resource_key_defaults_to_first_part():
-    item = normalize_video_url("https://www.bilibili.com/video/BV1abc?utm_source=test")
+def test_bilibili_keeps_content_selector_while_dropping_share_tracking(preview_api):
+    item = preview_api.preview_module.normalize_video_url(
+        "https://www.bilibili.com/video/BV1abc?p=2&t=45&spm_id_from=333&share_source=copy"
+    )
 
-    assert item.normalized_url == "https://www.bilibili.com/video/BV1abc"
-    assert item.resource_key == "bilibili:BV1abc:p1"
+    assert item.normalized_url == "https://www.bilibili.com/video/BV1abc?p=2&t=45"
+    assert item.resource_key == "bilibili:BV1abc:p2"
 
 
-def test_bilibili_path_part_is_normalized_as_a_part_query():
-    item = normalize_video_url("https://www.bilibili.com/video/BV1abc/p2?share_source=copy")
+def test_youtube_keeps_playlist_selector_while_dropping_tracking(preview_api):
+    item = preview_api.preview_module.normalize_video_url(
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123&spm=abc&share_source=copy"
+    )
+
+    assert item.normalized_url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123"
+    assert item.resource_key == "youtube:dQw4w9WgXcQ"
+
+
+def test_bilibili_path_part_is_normalized_as_a_part_query(preview_api):
+    item = preview_api.preview_module.normalize_video_url(
+        "https://www.bilibili.com/video/BV1abc/p2?share_source=copy"
+    )
 
     assert item.normalized_url == "https://www.bilibili.com/video/BV1abc?p=2"
     assert item.resource_key == "bilibili:BV1abc:p2"
 
 
-def test_preview_keeps_unsupported_youtube_pages_invalid():
-    item = normalize_video_url("https://www.youtube.com/channel/UC123")
+@pytest.mark.parametrize(("url", "error"), [
+    ("https://youtu.be/foo", "无法识别 YouTube 视频 ID"),
+    ("https://www.youtube.com/channel/UC123", "暂不支持该视频平台或链接格式无效"),
+    ("https://www.douyin.com/video/not-a-video-id", "无法识别 抖音 视频 ID"),
+    ("https://www.kuaishou.com/", "无法识别 快手 视频 ID"),
+])
+def test_preview_rejects_supported_platform_urls_without_video_ids(preview_api, url, error):
+    item = preview_api.preview_module.normalize_video_url(url)
+
+    assert item.valid is False
+    assert item.resource_key == ""
+    assert item.error == error
+
+
+@pytest.mark.parametrize("url", [
+    "https://douyin.com.evil.example/video/123456789",
+    "https://evil-kuaishou.com/short-video/abc123",
+])
+def test_preview_rejects_spoofed_platform_hosts(preview_api, url):
+    item = preview_api.preview_module.normalize_video_url(url)
 
     assert item.valid is False
     assert item.error == "暂不支持该视频平台或链接格式无效"
 
 
-def test_preview_expands_parts_in_source_order(monkeypatch):
+def test_kuaishou_short_video_url_has_a_stable_resource_key(preview_api):
+    item = preview_api.preview_module.normalize_video_url(
+        "https://www.kuaishou.com/short-video/3x7e4k9?from=share"
+    )
+
+    assert item.valid is True
+    assert item.normalized_url == "https://www.kuaishou.com/short-video/3x7e4k9"
+    assert item.resource_key == "kuaishou:3x7e4k9"
+
+
+def test_preview_expands_parts_in_source_order(preview_api, monkeypatch):
+    BilibiliDownloader = preview_api.downloader_module.BilibiliDownloader
+    BilibiliPart = preview_api.downloader_module.BilibiliPart
     monkeypatch.setattr(BilibiliDownloader, "list_parts", lambda self, url: [
         BilibiliPart(page=1, title="第一讲", duration=60, cover_url="cover"),
         BilibiliPart(page=2, title="第二讲", duration=90, cover_url="cover"),
     ])
 
-    items = preview_batch(["https://www.bilibili.com/video/BV1abc"])
+    items = preview_api.preview_module.preview_batch([
+        "https://www.bilibili.com/video/BV1abc",
+    ])
 
     assert [item.resource_key for item in items] == [
         "bilibili:BV1abc:p1",
@@ -72,10 +156,8 @@ def test_preview_expands_parts_in_source_order(monkeypatch):
     assert [item.title for item in items] == ["第一讲", "第二讲"]
 
 
-def test_preview_deduplicates_first_occurrence_without_reordering(monkeypatch):
-    monkeypatch.setattr(BilibiliDownloader, "list_parts", lambda self, url: [])
-
-    items = preview_batch([
+def test_preview_deduplicates_first_occurrence_without_reordering(preview_api):
+    items = preview_api.preview_module.preview_batch([
         "https://youtu.be/dQw4w9WgXcQ?utm_source=first",
         "not a supported link",
         "https://www.bilibili.com/video/BV1abc?p=2&spm_id_from=333",
@@ -92,8 +174,10 @@ def test_preview_deduplicates_first_occurrence_without_reordering(monkeypatch):
     assert items[1].error == "暂不支持该视频平台或链接格式无效"
 
 
-def test_list_parts_returns_only_the_explicit_bilibili_part(monkeypatch):
+def test_list_parts_returns_only_the_explicit_bilibili_part(preview_api, monkeypatch):
     captured = {}
+    BilibiliDownloader = preview_api.downloader_module.BilibiliDownloader
+    BilibiliPart = preview_api.downloader_module.BilibiliPart
 
     class FakeYoutubeDL:
         def __init__(self, options):
@@ -117,8 +201,7 @@ def test_list_parts_returns_only_the_explicit_bilibili_part(monkeypatch):
                 ],
             }
 
-    monkeypatch.setattr("app.downloaders.bilibili_downloader.yt_dlp.YoutubeDL", FakeYoutubeDL)
-    monkeypatch.setattr(BilibiliDownloader, "_write_netscape_cookie_file", lambda self: None)
+    monkeypatch.setattr(preview_api.downloader_module.yt_dlp, "YoutubeDL", FakeYoutubeDL)
 
     parts = BilibiliDownloader().list_parts("https://www.bilibili.com/video/BV1abc?p=2")
 

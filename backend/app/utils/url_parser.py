@@ -32,6 +32,11 @@ def extract_video_id(url: str, platform: str) -> Optional[str]:
         match = re.search(r"/video/(\d+)", url)
         return match.group(1) if match else None
 
+    elif platform == "kuaishou":
+        # 快手详情页由现有下载器按 short-video/<photo_id> 解析。
+        match = re.search(r"/short-video/([0-9A-Za-z_-]+)", url)
+        return match.group(1) if match else None
+
     return None
 
 
