@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import relationship
 
 from app.db.engine import Base
@@ -32,6 +32,9 @@ class NoteJob(Base):
     normalized_url = Column(Text, nullable=False)
     platform = Column(String, nullable=False)
     resource_key = Column(String, nullable=False)
+    title = Column(Text, nullable=True)
+    cover_url = Column(Text, nullable=True)
+    duration = Column(Float, nullable=True)
     status = Column(String, nullable=False, default=JobStatus.PENDING.value)
     attempt = Column(Integer, nullable=False, default=0)
     error_message = Column(Text, nullable=True)

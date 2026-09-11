@@ -56,6 +56,14 @@ def bilibili_resource_key(url: str) -> str:
 
 
 def normalize_video_url(url: str, platform: str | None = None) -> PreviewItem:
+    """Keep malformed URL parsing local to this row, including on submission."""
+    try:
+        return _normalize_video_url(url, platform)
+    except ValueError as error:
+        return _invalid_item(url, str(error))
+
+
+def _normalize_video_url(url: str, platform: str | None = None) -> PreviewItem:
     original_url = url
     candidate = url.strip()
     if not candidate:
