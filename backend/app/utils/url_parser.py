@@ -35,7 +35,7 @@ def extract_video_id(url: str, platform: str) -> Optional[str]:
     return None
 
 
-def resolve_bilibili_short_url(short_url: str) -> Optional[str]:
+def resolve_bilibili_short_url(short_url: str, timeout: float = 5.0) -> Optional[str]:
     """
     解析哔哩哔哩短链接以获取真实视频链接
 
@@ -43,14 +43,14 @@ def resolve_bilibili_short_url(short_url: str) -> Optional[str]:
     :return: 真实的视频链接或None
     """
     try:
-        response = requests.head(short_url, allow_redirects=True)
+        response = requests.head(short_url, allow_redirects=True, timeout=timeout)
         return response.url
     except requests.RequestException as e:
         print(f"Error resolving short URL: {e}")
         return None
 
 
-def extract_bilibili_p_number(url: str) -> Optional[int]:
+def extract_bilibili_p_number(url: str, resolve_short_url: bool = True) -> Optional[int]:
     """
     从 B 站分 P 视频 URL 中提取 p 参数（分 P 序号）。
 
@@ -63,7 +63,7 @@ def extract_bilibili_p_number(url: str) -> Optional[int]:
     :param url: B 站视频链接
     :return: 分 P 序号（从 1 开始），非分 P 视频返回 None
     """
-    if "b23.tv" in url:
+    if resolve_short_url and "b23.tv" in url:
         url = resolve_bilibili_short_url(url) or url
 
     # 匹配 ?p=NNN 或 &p=NNN

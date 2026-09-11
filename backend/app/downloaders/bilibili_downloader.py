@@ -3,6 +3,7 @@ import json
 import logging
 import tempfile
 from abc import ABC
+from dataclasses import dataclass
 from typing import Union, Optional, List
 
 import yt_dlp
@@ -13,7 +14,7 @@ from app.downloaders.bilibili_subtitle import BilibiliSubtitleFetcher
 from app.models.notes_model import AudioDownloadResult
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.utils.path_helper import get_data_dir
-from app.utils.url_parser import extract_video_id
+from app.utils.url_parser import extract_bilibili_p_number, extract_video_id
 from app.services.cookie_manager import CookieConfigManager
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,14 @@ logger = logging.getLogger(__name__)
 # gateway now requires; without them the API path returns HTTP 412. See
 # app/downloaders/bilibili_dm_patch.py for details.
 apply_bilibili_dm_img_patch()
+
+
+@dataclass(frozen=True)
+class BilibiliPart:
+    page: int
+    title: str
+    duration: float
+    cover_url: Optional[str]
 
 
 class BilibiliDownloader(Downloader, ABC):
@@ -46,6 +55,48 @@ class BilibiliDownloader(Downloader, ABC):
         tmp.close()
         logger.info("已生成 B站 Netscape Cookie 文件: %s (条目: %d)", tmp.name, len(lines) - 1)
         return tmp.name
+
+    def close(self) -> None:
+        """删除此 downloader 实例创建的临时 Cookie 文件。"""
+        if self._cookiefile and os.path.exists(self._cookiefile):
+            os.remove(self._cookiefile)
+        self._cookiefile = None
+
+    def list_parts(self, video_url: str) -> List[BilibiliPart]:
+        """读取 B 站分 P 元数据，不下载媒体文件。"""
+        ydl_opts = {
+            "skip_download": True,
+            "extract_flat": True,
+            "quiet": True,
+            "http_headers": {"Referer": "https://www.bilibili.com"},
+        }
+        if self._cookiefile:
+            ydl_opts["cookiefile"] = self._cookiefile
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+
+        entries = info.get("entries") or [info]
+        fallback_title = info.get("title") or ""
+        fallback_cover = info.get("thumbnail")
+        parts = []
+        for index, entry in enumerate(entries, start=1):
+            page = entry.get("playlist_index") or entry.get("page") or index
+            try:
+                page = int(page)
+            except (TypeError, ValueError):
+                page = index
+            parts.append(BilibiliPart(
+                page=page,
+                title=entry.get("title") or fallback_title,
+                duration=entry.get("duration") or 0,
+                cover_url=entry.get("thumbnail") or fallback_cover,
+            ))
+
+        selected_page = extract_bilibili_p_number(video_url)
+        if selected_page is not None:
+            return [part for part in parts if part.page == selected_page]
+        return parts
 
     def download(
         self,
