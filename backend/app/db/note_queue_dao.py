@@ -8,6 +8,15 @@ from app.db.models.note_jobs import JobStatus, NoteJob
 
 
 SENSITIVE_SETTINGS_KEYS = {"api_key", "apiKey", "token"}
+TERMINAL_JOB_STATUSES = {
+    JobStatus.SUCCESS.value,
+    JobStatus.FAILED.value,
+    JobStatus.CANCELLED.value,
+}
+CLAIMABLE_BATCH_STATUSES = {
+    BatchStatus.PENDING.value,
+    BatchStatus.RUNNING.value,
+}
 
 
 def sanitize_settings(settings):
@@ -65,11 +74,31 @@ def get_batch_detail(session, batch_id):
 
 def claim_next_job(session):
     while True:
+        active_job = (
+            session.query(NoteJob.task_id)
+            .filter(
+                NoteJob.status != JobStatus.PENDING.value,
+                NoteJob.status.notin_(TERMINAL_JOB_STATUSES),
+            )
+            .first()
+        )
+        if active_job is not None:
+            session.rollback()
+            return None
+
         job = (
             session.query(NoteJob)
             .join(NoteBatch)
-            .filter(NoteJob.status == JobStatus.PENDING.value)
-            .order_by(NoteBatch.created_at, NoteJob.position)
+            .filter(
+                NoteJob.status == JobStatus.PENDING.value,
+                NoteBatch.status.in_(CLAIMABLE_BATCH_STATUSES),
+            )
+            .order_by(
+                NoteBatch.created_at,
+                NoteBatch.id,
+                NoteJob.position,
+                NoteJob.task_id,
+            )
             .first()
         )
         if job is None:

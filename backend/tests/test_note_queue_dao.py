@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -23,7 +24,8 @@ from app.db.note_queue_dao import (
     get_batch_detail,
     update_job_status,
 )
-from app.db.models.note_jobs import JobStatus
+from app.db.models.note_batches import BatchStatus, NoteBatch
+from app.db.models.note_jobs import JobStatus, NoteJob
 
 
 @pytest.fixture
@@ -118,12 +120,137 @@ def test_claim_next_job_claims_pending_jobs_in_position_order(db_session):
     )
 
     first = claim_next_job(db_session)
+    assert (first.batch_id, first.position, first.status) == (batch.id, 0, "PARSING")
+    assert update_job_status(db_session, first.task_id, 0, JobStatus.SUCCESS)
     second = claim_next_job(db_session)
+    assert (second.batch_id, second.position, second.status) == (batch.id, 1, "PARSING")
+    assert update_job_status(db_session, second.task_id, 0, JobStatus.SUCCESS)
     third = claim_next_job(db_session)
 
-    assert (first.batch_id, first.position, first.status) == (batch.id, 0, "PARSING")
-    assert (second.batch_id, second.position, second.status) == (batch.id, 1, "PARSING")
     assert third is None
+
+
+def test_claim_next_job_blocks_all_pending_jobs_while_a_job_is_active(db_session):
+    create_batch(
+        db_session,
+        "request-active-first",
+        "课程",
+        "多行链接",
+        {},
+        [
+            {
+                "original_url": "https://example.com/first-0",
+                "normalized_url": "https://example.com/first-0",
+                "platform": "example",
+                "resource_key": "example:first-0",
+            },
+            {
+                "original_url": "https://example.com/first-1",
+                "normalized_url": "https://example.com/first-1",
+                "platform": "example",
+                "resource_key": "example:first-1",
+            },
+        ],
+    )
+    create_batch(
+        db_session,
+        "request-active-second",
+        "课程",
+        "多行链接",
+        {},
+        [
+            {
+                "original_url": "https://example.com/second-0",
+                "normalized_url": "https://example.com/second-0",
+                "platform": "example",
+                "resource_key": "example:second-0",
+            }
+        ],
+    )
+
+    claimed = claim_next_job(db_session)
+
+    assert claimed.status == "PARSING"
+    assert claim_next_job(db_session) is None
+
+
+def test_claim_next_job_skips_jobs_in_a_paused_batch(db_session):
+    batch = create_batch(
+        db_session,
+        "request-paused",
+        "课程",
+        "多行链接",
+        {},
+        [
+            {
+                "original_url": "https://example.com/paused",
+                "normalized_url": "https://example.com/paused",
+                "platform": "example",
+                "resource_key": "example:paused",
+            }
+        ],
+    )
+    (
+        db_session.query(NoteBatch)
+        .filter(NoteBatch.id == batch.id)
+        .update({"status": BatchStatus.PAUSED.value})
+    )
+    db_session.commit()
+
+    assert claim_next_job(db_session) is None
+
+
+def test_claim_next_job_breaks_equal_creation_times_by_batch_id(db_session):
+    created_at = datetime(2026, 9, 11, 12, 0, 0)
+    db_session.add_all(
+        [
+            NoteBatch(
+                id="batch-z",
+                request_id="request-tie-z",
+                name="课程",
+                source_label="多行链接",
+                settings_json="{}",
+                status=BatchStatus.PENDING.value,
+                created_at=created_at,
+            ),
+            NoteBatch(
+                id="batch-a",
+                request_id="request-tie-a",
+                name="课程",
+                source_label="多行链接",
+                settings_json="{}",
+                status=BatchStatus.PENDING.value,
+                created_at=created_at,
+            ),
+            NoteJob(
+                task_id="job-z",
+                batch_id="batch-z",
+                position=0,
+                original_url="https://example.com/z",
+                normalized_url="https://example.com/z",
+                platform="example",
+                resource_key="example:z",
+                status=JobStatus.PENDING.value,
+                created_at=created_at,
+            ),
+            NoteJob(
+                task_id="job-a",
+                batch_id="batch-a",
+                position=0,
+                original_url="https://example.com/a",
+                normalized_url="https://example.com/a",
+                platform="example",
+                resource_key="example:a",
+                status=JobStatus.PENDING.value,
+                created_at=created_at,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    claimed = claim_next_job(db_session)
+
+    assert (claimed.batch_id, claimed.task_id) == ("batch-a", "job-a")
 
 
 def test_update_job_status_requires_matching_attempt(db_session):
