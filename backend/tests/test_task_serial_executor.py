@@ -18,6 +18,7 @@ SerialTaskExecutor = task_serial_executor.SerialTaskExecutor
 class TestTaskSerialExecutor(unittest.TestCase):
     def test_executor_runs_tasks_one_by_one(self):
         executor = SerialTaskExecutor()
+        self.addCleanup(executor.shutdown)
         state_lock = threading.Lock()
         state = {"active": 0, "peak_active": 0}
 
