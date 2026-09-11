@@ -5,6 +5,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 from app.db.models.note_batches import BatchStatus, NoteBatch
@@ -38,7 +39,7 @@ class NoteQueueService:
     enforce one daemon in this process; deployment must use one backend process.
     """
 
-    def __init__(self, session_factory, runner: Callable[[QueueJobContext], None]):
+    def __init__(self, session_factory, runner: Callable[[QueueJobContext], Path | str | None]):
         self._session_factory = session_factory
         self._runner = runner
         self._wake = threading.Event()
