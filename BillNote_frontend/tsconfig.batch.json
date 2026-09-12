@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.batch.tsbuildinfo"
+  },
+  "include": [
+    "src/features/batch",
+    "src/hooks/useTaskPolling.ts",
+    "src/hooks/useTaskPolling.test.tsx",
+    "src/store/taskStore/index.ts",
+    "src/services/note.ts",
+    "src/test/setup.ts",
+    "src/vite-env.d.ts"
+  ]
+}
