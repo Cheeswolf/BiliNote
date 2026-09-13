@@ -1,3 +1,4 @@
+import { createJSONStorage } from 'zustand/middleware'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { set as setItem } from 'idb-keyval'
 import { useTaskStore } from '@/store/taskStore'
@@ -103,4 +104,100 @@ it('does not resurrect a history note deleted after it was recognized as already
   await useBatchStore.getState().importSuccessfulTasks(detailWithJob('SUCCESS'))
   expect(useTaskStore.getState().tasks).toHaveLength(0)
   expect(getResult).toHaveBeenCalledTimes(1)
+})
+
+it('blocks imports and pending-task writes after a real persist hydration read failure, then preserves old history on recovery', async () => {
+  useTaskStore.getState().addPendingTask('existing-note', 'youtube')
+  useTaskStore
+    .getState()
+    .updateTaskContent('existing-note', { status: 'SUCCESS', markdown: 'Existing history' })
+  const oldTasks = useTaskStore.getState().tasks
+  let persisted = JSON.stringify({
+    version: 0,
+    state: { tasks: oldTasks, currentTaskId: 'existing-note' },
+  })
+  const originalHistory = persisted
+  useTaskStore.setState({ tasks: [], currentTaskId: null })
+  const originalStorage = useTaskStore.persist.getOptions().storage
+  let unavailable = true
+  const write = vi.fn(async (_name: string, value: string) => {
+    persisted = value
+  })
+  useTaskStore.persist.setOptions({
+    storage: createJSONStorage(() => ({
+      getItem: async () => {
+        if (unavailable) throw new Error('IndexedDB read denied')
+        return persisted
+      },
+      setItem: write,
+      removeItem: async () => {},
+    })),
+  })
+  try {
+    await useTaskStore.persist.rehydrate()
+    expect(useTaskStore.persist.hasHydrated()).toBe(false)
+    getResult.mockResolvedValue(successfulResult)
+    await expect(
+      useBatchStore.getState().importSuccessfulTasks(detailWithJob('SUCCESS'))
+    ).rejects.toThrow(/history|storage/i)
+    expect(() => useTaskStore.getState().addPendingTask('new-pending', 'youtube')).toThrow(
+      /history|storage/i
+    )
+    expect(useTaskStore.getState().tasks).toEqual([])
+    expect(useTaskStore.getState().storageError).toMatch(/IndexedDB read denied/)
+    expect(write).not.toHaveBeenCalled()
+    expect(persisted).toBe(originalHistory)
+    expect(getResult).not.toHaveBeenCalled()
+    unavailable = false
+    await useBatchStore.getState().importSuccessfulTasks(detailWithJob('SUCCESS'))
+    expect(useTaskStore.getState().tasks.map(task => task.id)).toEqual(['task-1', 'existing-note'])
+    expect(useTaskStore.getState().storageError).toBeNull()
+    expect(JSON.parse(persisted).state.tasks).toHaveLength(2)
+  } finally {
+    useTaskStore.persist.setOptions({ storage: originalStorage })
+    await useTaskStore.persist.rehydrate()
+  }
+})
+it('retrieves results with peak concurrency one across concurrent batches, continues failures, and retries only missing imports', async () => {
+  const detail = detailWithJob('SUCCESS')
+  detail.jobs = ['task-1', 'task-2', 'task-3'].map((task_id, position) => ({
+    ...detail.jobs[0],
+    task_id,
+    position,
+  }))
+  detail.total = 3
+  detail.counts.SUCCESS = 3
+  let inFlight = 0
+  let peak = 0
+  let failSecond = true
+  const calls: string[] = []
+  getResult.mockImplementation(async id => {
+    calls.push(id)
+    inFlight += 1
+    peak = Math.max(peak, inFlight)
+    await new Promise(resolve => setTimeout(resolve, 1))
+    inFlight -= 1
+    if (id === 'task-2' && failSecond) throw new Error('offline')
+    return { ...successfulResult, task_id: id }
+  })
+  const other = {
+    ...detailWithJob('SUCCESS', 'batch-2'),
+    jobs: [{ ...detail.jobs[0], task_id: 'task-4' }],
+  }
+  const outcomes = await Promise.allSettled([
+    useBatchStore.getState().importSuccessfulTasks(detail),
+    useBatchStore.getState().importSuccessfulTasks(other),
+  ])
+  expect(outcomes[0].status).toBe('rejected')
+  expect(outcomes[1].status).toBe('fulfilled')
+  expect(peak).toBe(1)
+  expect(
+    useTaskStore
+      .getState()
+      .tasks.map(task => task.id)
+      .sort()
+  ).toEqual(['task-1', 'task-3', 'task-4'])
+  failSecond = false
+  await useBatchStore.getState().importSuccessfulTasks(detail)
+  expect(calls).toEqual(['task-1', 'task-2', 'task-3', 'task-4', 'task-2'])
 })

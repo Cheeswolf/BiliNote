@@ -1,7 +1,7 @@
 import { create } from 'zustand'
-import { ResultUnavailableError } from '@/utils/polling'
+import { ResultUnavailableError, TaskStorageError } from '@/utils/polling'
 import { get_task_status } from '@/services/note'
-import { useTaskStore } from '@/store/taskStore'
+import { ensureTaskHistoryHydrated, useTaskStore } from '@/store/taskStore'
 import type { BatchDetail, BatchJobSummary, BatchList, ConnectionStatus } from './types'
 
 interface BatchStore {
@@ -15,18 +15,10 @@ interface BatchStore {
   setConnection: (connection: ConnectionStatus) => void
   importSuccessfulTasks: (detail: BatchDetail) => Promise<void>
 }
-// Shared across callers so concurrent hooks or refreshes cannot import twice.
-const importing = new Map<string, Promise<void>>()
-let hydration: Promise<void> | undefined
-const hydrateHistory = async () => {
-  if (useTaskStore.persist.hasHydrated()) return
-  hydration ??= Promise.resolve(useTaskStore.persist.rehydrate()).finally(() => {
-    hydration = undefined
-  })
-  await hydration
-}
+// Serialize result retrieval across all batch callers, including overlapping mounts.
+let importQueue: Promise<void> = Promise.resolve()
 const importJob = async (job: BatchJobSummary) => {
-  await hydrateHistory()
+  await ensureTaskHistoryHydrated()
   if (useBatchStore.getState().importedTaskIds[job.task_id]) return
   if (
     useTaskStore.getState().tasks.some(task => task.id === job.task_id && task.status === 'SUCCESS')
@@ -36,9 +28,7 @@ const importJob = async (job: BatchJobSummary) => {
     }))
     return
   }
-  const existing = importing.get(job.task_id)
-  if (existing) return existing
-  const pending = (async () => {
+  {
     const response = await get_task_status(job.task_id, { suppressToast: true })
     if (response.status !== 'SUCCESS' || !response.result)
       throw new ResultUnavailableError(
@@ -87,12 +77,6 @@ const importJob = async (job: BatchJobSummary) => {
     useBatchStore.setState(state => ({
       importedTaskIds: { ...state.importedTaskIds, [job.task_id]: true },
     }))
-  })()
-  importing.set(job.task_id, pending)
-  try {
-    await pending
-  } finally {
-    importing.delete(job.task_id)
   }
 }
 export const useBatchStore = create<BatchStore>(set => ({
@@ -104,12 +88,22 @@ export const useBatchStore = create<BatchStore>(set => ({
   setActive: active => set({ active }),
   setList: list => set({ list }),
   setConnection: connection => set({ connection }),
-  importSuccessfulTasks: async detail => {
-    // All successes get a chance even when one result is temporarily unavailable.
-    const results = await Promise.allSettled(
-      detail.jobs.filter(job => job.status === 'SUCCESS').map(importJob)
-    )
-    const failed = results.find(result => result.status === 'rejected')
-    if (failed?.status === 'rejected') throw failed.reason
+  importSuccessfulTasks: detail => {
+    const next = importQueue.then(async () => {
+      const failures: unknown[] = []
+      for (const job of detail.jobs) {
+        if (job.status !== 'SUCCESS') continue
+        try {
+          await importJob(job)
+        } catch (error) {
+          // Storage failure affects all imports; wait for recovery before any history write.
+          if (error instanceof TaskStorageError) throw error
+          failures.push(error)
+        }
+      }
+      if (failures.length) throw failures[0]
+    })
+    importQueue = next.catch(() => {})
+    return next
   },
 }))

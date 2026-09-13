@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { isPollingNetworkError } from '@/utils/polling'
+import { isLegacyTaskFailure, isPollingNetworkError } from '@/utils/polling'
 import { useTaskStore } from '@/store/taskStore'
 import { get_task_status } from '@/services/note'
 import toast from 'react-hot-toast'
@@ -43,11 +43,12 @@ export const useTaskPolling = (interval = 3000) => {
                 audioMeta: { ...audio_meta, cover_url: audio_meta.cover_url ?? '' },
               })
               toast.success('笔记生成成功')
-            } else if (res.status !== 'SUCCESS') {
+            } else if (res.status !== 'SUCCESS' && res.status !== task.status) {
               store.updateTaskContent(task.id, { status: res.status })
             }
           } catch (error) {
             if (cancelled) break
+            if (isLegacyTaskFailure(error)) store.updateTaskContent(task.id, { status: 'FAILED' })
             const offline = isPollingNetworkError(error)
             disconnected ||= offline
             store.setTaskConnection(task.id, offline ? 'offline' : 'online')

@@ -1,4 +1,5 @@
-import { create } from 'zustand'
+import { create, type StateCreator } from 'zustand'
+import { TaskStorageError } from '@/utils/polling'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { delete_task, generateNote } from '@/services/note.ts'
 import { v4 as uuidv4 } from 'uuid'
@@ -78,6 +79,7 @@ export interface Task {
 interface TaskStore {
   tasks: Task[]
   currentTaskId: string | null
+  storageError: string | null
   connections: Record<string, TaskConnection>
   setTaskConnection: (id: string, connection: TaskConnection) => void
   importCompletedTask: (task: Task) => void
@@ -90,184 +92,222 @@ interface TaskStore {
   retryTask: (id: string, payload?: Task['formData']) => Promise<void>
 }
 
-export const useTaskStore = create<TaskStore>()(
-  persist(
-    (set, get) => ({
-      tasks: [],
-      currentTaskId: null,
-      connections: {},
-      setTaskConnection: (id, connection) =>
-        set(state => ({ connections: { ...state.connections, [id]: connection } })),
-      importCompletedTask: task =>
-        set(state => {
-          const existing = state.tasks.find(t => t.id === task.id)
-          if (existing?.status === 'SUCCESS') return state
-          return {
-            tasks: existing
-              ? state.tasks.map(t => (t.id === task.id ? { ...task, createdAt: t.createdAt } : t))
-              : [task, ...state.tasks],
-          }
-        }),
-
-      addPendingTask: (
-        taskId,
-        platform,
-        formData = { video_url: '', platform, quality: '', model_name: '', provider_id: '' }
-      ) =>
-        set(state => ({
-          tasks: [
-            {
-              formData: formData,
-              id: taskId,
-              status: 'PENDING',
-              markdown: '',
-              platform: platform,
-              transcript: {
-                full_text: '',
-                language: '',
-                raw: null,
-                segments: [],
-              },
-              createdAt: new Date().toISOString(),
-              audioMeta: {
-                cover_url: '',
-                duration: 0,
-                file_path: '',
-                platform: '',
-                raw_info: null,
-                title: '',
-                video_id: '',
-              },
-            },
-            ...state.tasks,
-          ],
-          currentTaskId: taskId, // 默认设置为当前任务
-        })),
-
-      updateTaskContent: (id, data) =>
-        set(state => ({
-          tasks: state.tasks.map(task => {
-            if (task.id !== id) return task
-
-            if (task.status === 'SUCCESS' && data.status === 'SUCCESS') return task
-
-            // 如果是 markdown 字符串，封装为版本
-            if (typeof data.markdown === 'string') {
-              const prev = task.markdown
-              const newVersion: Markdown = {
-                ver_id: `${task.id}-${uuidv4()}`,
-                content: data.markdown,
-                style: task.formData.style || '',
-                model_name: task.formData.model_name || '',
-                created_at: new Date().toISOString(),
-              }
-
-              let updatedMarkdown: Markdown[]
-              if (Array.isArray(prev)) {
-                updatedMarkdown = [newVersion, ...prev]
-              } else {
-                updatedMarkdown = [
-                  newVersion,
-                  ...(typeof prev === 'string' && prev
-                    ? [
-                        {
-                          ver_id: `${task.id}-${uuidv4()}`,
-                          content: prev,
-                          style: task.formData.style || '',
-                          model_name: task.formData.model_name || '',
-                          created_at: new Date().toISOString(),
-                        },
-                      ]
-                    : []),
-                ]
-              }
-
-              return {
-                ...task,
-                ...data,
-                markdown: updatedMarkdown,
-              }
-            }
-
-            return { ...task, ...data }
-          }),
-        })),
-
-      getCurrentTask: () => {
-        const currentTaskId = get().currentTaskId
-        return get().tasks.find(task => task.id === currentTaskId) || null
-      },
-      retryTask: async (id, payload) => {
-        if (!id) {
-          toast.error('任务不存在')
+type PersistedTaskState = Pick<TaskStore, 'tasks' | 'currentTaskId'>
+const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', PersistedTaskState]]> = (
+  setTransient,
+  getState,
+  api
+) =>
+  persist<TaskStore, [], [], PersistedTaskState>(
+    (persistSet, get) => {
+      const set = (update: Partial<TaskStore> | ((state: TaskStore) => Partial<TaskStore>)) => {
+        assertTaskHistoryHydrated()
+        const current = get()
+        const next = typeof update === 'function' ? update(current) : update
+        if (
+          Object.keys(next).every(key =>
+            Object.is(current[key as keyof TaskStore], next[key as keyof TaskStore])
+          )
+        )
           return
-        }
-        const task = get().tasks.find(task => task.id === id)
-        console.log('retry', task)
-        if (!task) return
+        persistSet(next)
+      }
+      return {
+        tasks: [],
+        currentTaskId: null,
+        connections: {},
+        storageError: null,
+        setTaskConnection: (id, connection) => {
+          if (get().connections[id] === connection) return
+          // Use the original Zustand setter: transient state must not call persist.setItem.
+          setTransient(state => ({ connections: { ...state.connections, [id]: connection } }))
+        },
+        importCompletedTask: task =>
+          set(state => {
+            const existing = state.tasks.find(t => t.id === task.id)
+            if (existing?.status === 'SUCCESS') return state
+            return {
+              tasks: existing
+                ? state.tasks.map(t => (t.id === task.id ? { ...task, createdAt: t.createdAt } : t))
+                : [task, ...state.tasks],
+            }
+          }),
 
-        const newFormData = payload || task.formData
-        try {
-          await generateNote({
-            ...newFormData,
-            style: newFormData.style ?? '',
-            format: newFormData.format ?? [],
-            grid_size: newFormData.grid_size ?? [],
-            task_id: id,
-          })
-        } catch (e: unknown) {
-          const error = e as { data?: { reason?: string; downloading?: boolean } }
-          // 就绪门禁：转写模型未下载好。不要把任务标成 PENDING（会一直转），
-          // 给提示让用户先去下载。
-          if (error?.data?.reason === 'transcriber_model_not_ready') {
-            toast.error(
-              error?.data?.downloading
-                ? '转写模型正在下载中，请稍候再重试'
-                : '转写模型尚未下载，请先去「设置 → 音频转写配置」页下载'
-            )
+        addPendingTask: (
+          taskId,
+          platform,
+          formData = { video_url: '', platform, quality: '', model_name: '', provider_id: '' }
+        ) =>
+          set(state => ({
+            tasks: [
+              {
+                formData: formData,
+                id: taskId,
+                status: 'PENDING',
+                markdown: '',
+                platform: platform,
+                transcript: {
+                  full_text: '',
+                  language: '',
+                  raw: null,
+                  segments: [],
+                },
+                createdAt: new Date().toISOString(),
+                audioMeta: {
+                  cover_url: '',
+                  duration: 0,
+                  file_path: '',
+                  platform: '',
+                  raw_info: null,
+                  title: '',
+                  video_id: '',
+                },
+              },
+              ...state.tasks,
+            ],
+            currentTaskId: taskId, // 默认设置为当前任务
+          })),
+
+        updateTaskContent: (id, data) => {
+          const task = get().tasks.find(task => task.id === id)
+          if (
+            !task ||
+            Object.entries(data).every(([key, value]) => Object.is(task[key as keyof Task], value))
+          )
+            return
+          set(state => ({
+            tasks: state.tasks.map(task => {
+              if (task.id !== id) return task
+
+              if (task.status === 'SUCCESS' && data.status === 'SUCCESS') return task
+
+              // 如果是 markdown 字符串，封装为版本
+              if (typeof data.markdown === 'string') {
+                const prev = task.markdown
+                const newVersion: Markdown = {
+                  ver_id: `${task.id}-${uuidv4()}`,
+                  content: data.markdown,
+                  style: task.formData.style || '',
+                  model_name: task.formData.model_name || '',
+                  created_at: new Date().toISOString(),
+                }
+
+                let updatedMarkdown: Markdown[]
+                if (Array.isArray(prev)) {
+                  updatedMarkdown = [newVersion, ...prev]
+                } else {
+                  updatedMarkdown = [
+                    newVersion,
+                    ...(typeof prev === 'string' && prev
+                      ? [
+                          {
+                            ver_id: `${task.id}-${uuidv4()}`,
+                            content: prev,
+                            style: task.formData.style || '',
+                            model_name: task.formData.model_name || '',
+                            created_at: new Date().toISOString(),
+                          },
+                        ]
+                      : []),
+                  ]
+                }
+
+                return {
+                  ...task,
+                  ...data,
+                  markdown: updatedMarkdown,
+                }
+              }
+
+              return { ...task, ...data }
+            }),
+          }))
+        },
+
+        getCurrentTask: () => {
+          const currentTaskId = get().currentTaskId
+          return get().tasks.find(task => task.id === currentTaskId) || null
+        },
+        retryTask: async (id, payload) => {
+          if (!id) {
+            toast.error('任务不存在')
             return
           }
-          console.error('重试任务失败：', e)
-          return
-        }
+          const task = get().tasks.find(task => task.id === id)
+          console.log('retry', task)
+          if (!task) return
 
-        set(state => ({
-          tasks: state.tasks.map(t =>
-            t.id === id
-              ? {
-                  ...t,
-                  formData: newFormData, // ✅ 显式更新 formData
-                  status: 'PENDING',
-                }
-              : t
-          ),
-        }))
-      },
+          const newFormData = payload || task.formData
+          try {
+            await generateNote({
+              ...newFormData,
+              style: newFormData.style ?? '',
+              format: newFormData.format ?? [],
+              grid_size: newFormData.grid_size ?? [],
+              task_id: id,
+            })
+          } catch (e: unknown) {
+            const error = e as { data?: { reason?: string; downloading?: boolean } }
+            // 就绪门禁：转写模型未下载好。不要把任务标成 PENDING（会一直转），
+            // 给提示让用户先去下载。
+            if (error?.data?.reason === 'transcriber_model_not_ready') {
+              toast.error(
+                error?.data?.downloading
+                  ? '转写模型正在下载中，请稍候再重试'
+                  : '转写模型尚未下载，请先去「设置 → 音频转写配置」页下载'
+              )
+              return
+            }
+            console.error('重试任务失败：', e)
+            return
+          }
 
-      removeTask: async id => {
-        const task = get().tasks.find(t => t.id === id)
+          set(state => ({
+            tasks: state.tasks.map(t =>
+              t.id === id
+                ? {
+                    ...t,
+                    formData: newFormData, // ✅ 显式更新 formData
+                    status: 'PENDING',
+                  }
+                : t
+            ),
+          }))
+        },
 
-        // 更新 Zustand 状态
-        set(state => ({
-          tasks: state.tasks.filter(task => task.id !== id),
-          currentTaskId: state.currentTaskId === id ? null : state.currentTaskId,
-        }))
+        removeTask: async id => {
+          const task = get().tasks.find(t => t.id === id)
 
-        // 调用后端删除接口（如果找到了任务）
-        if (task) {
-          await delete_task({
-            video_id: task.audioMeta.video_id,
-            platform: task.platform || task.audioMeta.platform || task.formData.platform,
-          })
-        }
-      },
+          // 更新 Zustand 状态
+          set(state => ({
+            tasks: state.tasks.filter(task => task.id !== id),
+            currentTaskId: state.currentTaskId === id ? null : state.currentTaskId,
+          }))
 
-      clearTasks: () => set({ tasks: [], currentTaskId: null }),
+          // 调用后端删除接口（如果找到了任务）
+          if (task) {
+            await delete_task({
+              video_id: task.audioMeta.video_id,
+              platform: task.platform || task.audioMeta.platform || task.formData.platform,
+            })
+          }
+        },
 
-      setCurrentTask: taskId => set({ currentTaskId: taskId }),
-    }),
+        clearTasks: () => set({ tasks: [], currentTaskId: null }),
+
+        setCurrentTask: taskId => set({ currentTaskId: taskId }),
+      }
+    },
     {
       name: 'task-storage',
+      onRehydrateStorage: () => (_state, error) => {
+        setTransient({
+          storageError: error
+            ? 'Task history storage unavailable: ' +
+              (error instanceof Error ? error.message : String(error))
+            : null,
+        })
+      },
       // Preserve the existing version/key and all old note shapes; only normalize the typo.
       merge: (persisted, current) => {
         const saved = persisted as Partial<TaskStore> | undefined
@@ -295,5 +335,24 @@ export const useTaskStore = create<TaskStore>()(
         },
       })),
     }
-  )
-)
+  )(setTransient, getState, api)
+
+export const useTaskStore = create<TaskStore>()(createTaskStore)
+
+const assertTaskHistoryHydrated = () => {
+  if (!useTaskStore.persist.hasHydrated()) {
+    throw new TaskStorageError(
+      useTaskStore.getState().storageError || 'Task history storage has not finished loading'
+    )
+  }
+}
+let hydration: Promise<void> | undefined
+export const ensureTaskHistoryHydrated = async () => {
+  if (useTaskStore.persist.hasHydrated()) return
+  hydration ??= Promise.resolve(useTaskStore.persist.rehydrate()).finally(() => {
+    hydration = undefined
+  })
+  await hydration
+  // Zustand resolves even when its storage read failed. Only this flag confirms success.
+  assertTaskHistoryHydrated()
+}
