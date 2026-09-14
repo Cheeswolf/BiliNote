@@ -50,7 +50,7 @@ export const useModelStore = create<ModelStore>()(
     loadEnabledModels: async () => {
       try {
         set({ loading: true })
-        const list = await fetchEnableModels()
+        const list = await fetchEnableModels() as unknown as IModelListItem[]
         set({ modelList: list })
       } catch (error) {
         set({ modelList: [] })
@@ -64,7 +64,7 @@ export const useModelStore = create<ModelStore>()(
     loadModels: async (providerId: string) => {
       try {
         set({ loading: true })
-        const res = await fetchModels(providerId)
+        const res = await fetchModels(providerId) as unknown as { models: IModel[] | { data: IModel[] } }
 
         let models: IModel[] = []
 
@@ -99,7 +99,7 @@ export const useModelStore = create<ModelStore>()(
     //  新增模型逻辑
     addNewModel: async (providerId: string, modelId: string) => {
       try {
-        const res = await addModel({ provider_id: providerId, model_name: modelId })
+        const res = await addModel({ provider_id: providerId, model_name: modelId }) as unknown as { code: number; msg?: string }
 
         if (res.code === 0) {
           console.log('新增模型成功:', modelId)

@@ -18,7 +18,7 @@ export const generateNote = async (data: {
 }) => {
   try {
     console.log('generateNote', data)
-    const response = await request.post('/generate_note', data)
+    const response = await request.post<unknown, { task_id: string }>('/generate_note', data)
 
     if (!response) return null
     toast.success('笔记生成任务已提交！')

@@ -1,7 +1,7 @@
 export const KuaishouLogo = () => {
   return (
     <svg
-      t="1746695310517"
+      data-generated-at="1746695310517"
       className="icon"
       viewBox="0 0 1024 1024"
       version="1.1"
@@ -31,7 +31,7 @@ export const KuaishouLogo = () => {
 export const DouyinLogo = () => {
   return (
     <svg
-      t="1746695428425"
+      data-generated-at="1746695428425"
       className="icon"
       viewBox="0 0 1024 1024"
       version="1.1"
@@ -67,7 +67,7 @@ export const DouyinLogo = () => {
 export const BiliBiliLogo = () => {
   return (
     <svg
-      t="1746696526393"
+      data-generated-at="1746696526393"
       className="icon"
       viewBox="0 0 1024 1024"
       version="1.1"
@@ -123,7 +123,7 @@ export const BiliBiliLogo = () => {
 export const YoutubeLogo = () => {
   return (
     <svg
-      t="1746696577253"
+      data-generated-at="1746696577253"
       className="icon"
       viewBox="0 0 1024 1024"
       version="1.1"
@@ -144,7 +144,7 @@ export const YoutubeLogo = () => {
 export const LocalLogo = () => {
   return (
     <svg
-      t="1746696617516"
+      data-generated-at="1746696617516"
       className="icon"
       viewBox="0 0 1024 1024"
       version="1.1"

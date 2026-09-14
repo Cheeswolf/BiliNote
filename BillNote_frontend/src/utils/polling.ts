@@ -18,6 +18,17 @@ export const pollingErrorMessage = (error: unknown): string => {
     typeof error.msg === 'string'
   )
     return error.msg
+  if (typeof error === 'object' && error !== null && 'detail' in error) {
+    if (typeof error.detail === 'string') return error.detail
+    if (Array.isArray(error.detail)) {
+      const messages = error.detail.flatMap((issue: unknown) =>
+        typeof issue === 'object' && issue !== null && 'msg' in issue && typeof issue.msg === 'string'
+          ? [issue.msg]
+          : []
+      )
+      if (messages.length) return messages.join('; ')
+    }
+  }
   return 'Refresh failed'
 }
 

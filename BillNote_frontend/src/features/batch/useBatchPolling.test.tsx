@@ -176,3 +176,20 @@ it('stays online when a terminal result is missing and leaves the task unimporte
   expect(useBatchStore.getState().error).toBe('Result missing')
   expect(useTaskStore.getState().tasks).toHaveLength(0)
 })
+
+it('serializes a requested management refresh behind a slow poll and suppresses its stale result', async () => {
+  let resolve!: (detail: BatchDetail) => void
+  getBatchMock.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    .mockResolvedValue(detailWithJob('DOWNLOADING'))
+  const { rerender } = renderHook(({ refreshKey }) => useBatchPolling('batch-1', 10, refreshKey),
+    { initialProps: { refreshKey: 0 } })
+  await tick()
+  rerender({ refreshKey: 1 })
+  await tick()
+  expect(getBatchMock).toHaveBeenCalledTimes(1)
+  await act(async () => resolve(detailWithJob('SUMMARIZING')))
+  expect(getBatchMock).toHaveBeenCalledTimes(2)
+  expect(useBatchStore.getState().active?.jobs[0].status).toBe('DOWNLOADING')
+  await tick(9)
+  expect(getBatchMock).toHaveBeenCalledTimes(2)
+})

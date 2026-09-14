@@ -5,6 +5,9 @@
   },
   "include": [
     "src/features/batch",
+    "src/pages/HomePage/components/NoteForm.tsx",
+    "src/pages/HomePage/components/NoteForm.test.tsx",
+    "src/layouts/HomeLayout.tsx",
     "src/hooks/useTaskPolling.ts",
     "src/hooks/useTaskPolling.test.tsx",
     "src/store/taskStore/index.ts",

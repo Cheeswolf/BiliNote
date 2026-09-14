@@ -5,7 +5,7 @@ import { useBatchStore } from './store'
 import { isTerminalBatch } from './types'
 import type { BatchDetail } from './types'
 
-export const useBatchPolling = (batchId: string | null | undefined, interval = 3000) => {
+export const useBatchPolling = (batchId: string | null | undefined, interval = 3000, refreshKey = 0) => {
   const inFlight = useRef<Promise<void> | null>(null)
   useEffect(() => {
     if (!batchId) return
@@ -15,7 +15,7 @@ export const useBatchPolling = (batchId: string | null | undefined, interval = 3
     const baseDelay = Math.max(1, interval)
     const cached = useBatchStore.getState().active
     let completed: BatchDetail | null =
-      cached?.id === batchId && isTerminalBatch(cached.status) ? cached : null
+      refreshKey === 0 && cached?.id === batchId && isTerminalBatch(cached.status) ? cached : null
     const poll = async () => {
       // Keep a changing selection and React StrictMode from overlapping requests.
       while (inFlight.current) await inFlight.current
@@ -75,5 +75,5 @@ export const useBatchPolling = (batchId: string | null | undefined, interval = 3
       clearTimeout(timer)
       unsubscribe()
     }
-  }, [batchId, interval])
+  }, [batchId, interval, refreshKey])
 }

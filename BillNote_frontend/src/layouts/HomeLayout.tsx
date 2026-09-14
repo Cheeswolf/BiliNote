@@ -7,7 +7,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip.tsx'
 
-import { Link } from 'react-router-dom'
+import { Link, NavLink } from 'react-router-dom'
 import { ResizablePanel, ResizablePanelGroup, ResizableHandle } from '@/components/ui/resizable'
 import { ScrollArea } from "@/components/ui/scroll-area.tsx"
 import type { ImperativePanelHandle } from 'react-resizable-panels'
@@ -78,6 +78,10 @@ const HomeLayout: FC<IProps> = ({ NoteForm, Preview, History }) => {
                 </TooltipProvider>
               </div>
             </header>
+            <nav aria-label="工作区" className="flex gap-2 border-b px-4 pb-3 text-sm">
+              <NavLink to="/" end className="flex-1 rounded-md bg-neutral-100 px-3 py-2 text-center font-medium">单个视频</NavLink>
+              <NavLink to="/batch" className="flex-1 rounded-md px-3 py-2 text-center hover:bg-neutral-100">批量任务</NavLink>
+            </nav>
             <ScrollArea className="flex-1 overflow-auto">
               <div className="p-4">{NoteForm}</div>
             </ScrollArea>
