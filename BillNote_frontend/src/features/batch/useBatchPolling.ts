@@ -9,9 +9,12 @@ import type { BatchDetail } from './types'
 let inFlight: Promise<void> | null = null
 
 export const useBatchPolling = (batchId: string | null | undefined, interval = 3000, refreshKey = 0) => {
+  const detailRevision = useBatchStore(state => batchId ? (state.detailRevisions[batchId] ?? 0) : 0)
   useEffect(() => {
     if (!batchId) return
     let cancelled = false
+    const isStale = () => cancelled ||
+      (useBatchStore.getState().detailRevisions[batchId] ?? 0) !== detailRevision
     let timer: ReturnType<typeof setTimeout> | undefined
     let failures = 0
     const baseDelay = Math.max(1, interval)
@@ -21,21 +24,21 @@ export const useBatchPolling = (batchId: string | null | undefined, interval = 3
     const poll = async () => {
       // Keep a changing selection and React StrictMode from overlapping requests.
       while (inFlight) await inFlight
-      if (cancelled) return
+      if (isStale()) return
       const run = async () => {
         let retry = false
         try {
           if (useBatchStore.getState().connection !== 'online')
             useBatchStore.getState().setConnection('reconnecting')
           const detail = completed ?? (await getBatch(batchId, { suppressToast: true }))
-          if (cancelled) return
+          if (isStale()) return
           useBatchStore.setState({ active: detail, connection: 'online', error: null })
           if (isTerminalBatch(detail.status)) completed = detail
           await useBatchStore.getState().importSuccessfulTasks(detail)
           failures = 0
           retry = !completed
         } catch (error) {
-          if (cancelled) return
+          if (isStale()) return
           failures += 1
           useBatchStore.setState({
             connection: isPollingNetworkError(error) ? 'offline' : 'online',
@@ -43,7 +46,7 @@ export const useBatchPolling = (batchId: string | null | undefined, interval = 3
           })
           retry = true
         } finally {
-          if (!cancelled && retry)
+          if (!isStale() && retry)
             timer = setTimeout(
               () => {
                 void poll()
@@ -77,5 +80,5 @@ export const useBatchPolling = (batchId: string | null | undefined, interval = 3
       clearTimeout(timer)
       unsubscribe()
     }
-  }, [batchId, interval, refreshKey])
+  }, [batchId, interval, refreshKey, detailRevision])
 }

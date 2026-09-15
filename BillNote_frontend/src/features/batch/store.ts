@@ -10,6 +10,8 @@ interface BatchStore {
   connection: ConnectionStatus
   error: string | null
   importedTaskIds: Record<string, true>
+  detailRevisions: Record<string, number>
+  invalidateDetail: (batchId: string) => void
   setActive: (detail: BatchDetail | null) => void
   setList: (list: BatchList) => void
   setConnection: (connection: ConnectionStatus) => void
@@ -85,6 +87,14 @@ export const useBatchStore = create<BatchStore>(set => ({
   connection: 'online',
   error: null,
   importedTaskIds: {},
+  detailRevisions: {},
+  invalidateDetail: batchId => set(state => ({
+    active: state.active?.id === batchId ? null : state.active,
+    detailRevisions: {
+      ...state.detailRevisions,
+      [batchId]: (state.detailRevisions[batchId] ?? 0) + 1,
+    },
+  })),
   setActive: active => set({ active }),
   setList: list => set({ list }),
   setConnection: connection => set({ connection }),

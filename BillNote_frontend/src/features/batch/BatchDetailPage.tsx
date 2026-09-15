@@ -21,8 +21,7 @@ export default function BatchDetailPage() {
   const tasks = useTaskStore(state => state.tasks)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [refresh, setRefresh] = useState(0)
-  useBatchPolling(batchId, 3000, refresh)
+  useBatchPolling(batchId)
   const detail = active?.id === batchId ? active : null
   const action = async (mutation: (id: string) => Promise<BatchDetail>) => {
     if (!batchId || busy) return
@@ -30,11 +29,8 @@ export default function BatchDetailPage() {
     setError(null)
     try {
       await mutation(batchId)
-      if (useBatchStore.getState().active?.id === batchId) {
-        useBatchStore.getState().setActive(null)
-      }
-      // Let the existing polling hook serialize the immediate authoritative refresh.
-      setRefresh(value => value + 1)
+      // Notify whichever detail instance is mounted when this mutation finishes.
+      useBatchStore.getState().invalidateDetail(batchId)
     } catch (error) { setError(pollingErrorMessage(error)) }
     finally { setBusy(false) }
   }

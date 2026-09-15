@@ -161,3 +161,49 @@ it('revalidates after retry, a delayed refresh, and leaving then reopening the d
   await screen.findByText('下载中')
   expect(getBatch).toHaveBeenCalledTimes(3)
 })
+
+it('revalidates the reopened detail when a mutation started by its old instance finally succeeds', async () => {
+  const failed = { ...detailWithJob('FAILED'), status: 'PARTIAL' as const }
+  const next = detailWithJob('DOWNLOADING')
+  let finishMutation!: (value: typeof next) => void
+  vi.mocked(getBatch).mockResolvedValue(failed)
+  vi.mocked(retryFailed).mockImplementationOnce(() => new Promise(resolve => { finishMutation = resolve }))
+  render(<MemoryRouter initialEntries={['/batch/batch-1']}><Routes>
+    <Route path="/batch/:batchId" element={<BatchDetailPage />} />
+    <Route path="/batch" element={<Link to="/batch/batch-1">重新打开批次</Link>} />
+  </Routes></MemoryRouter>)
+  await screen.findByText('失败')
+  await userEvent.click(screen.getByRole('button', { name: '重试失败项' }))
+  expect(retryFailed).toHaveBeenCalledWith('batch-1')
+  await userEvent.click(screen.getByRole('link', { name: '批量任务中心' }))
+  await userEvent.click(screen.getByRole('link', { name: '重新打开批次' }))
+  await waitFor(() => expect(getBatch).toHaveBeenCalledTimes(2))
+  await screen.findByText('失败')
+  expect(useBatchStore.getState().active?.status).toBe('PARTIAL')
+  vi.mocked(getBatch).mockResolvedValue(next)
+  await act(async () => finishMutation(detailWithJob('PENDING')))
+  await screen.findByText('下载中')
+  expect(getBatch).toHaveBeenCalledTimes(3)
+  expect(useBatchStore.getState().active?.status).toBe('RUNNING')
+})
+
+it('does not invalidate another batch when a mutation from the previous detail succeeds', async () => {
+  const failed = { ...detailWithJob('FAILED'), status: 'PARTIAL' as const }
+  const other = { ...detailWithJob('CANCELLED', 'batch-2'), status: 'CANCELLED' as const, name: '另一个批次' }
+  let finishMutation!: (value: typeof failed) => void
+  vi.mocked(getBatch).mockImplementation(async id => id === 'batch-1' ? failed : other)
+  vi.mocked(retryFailed).mockImplementationOnce(() => new Promise(resolve => { finishMutation = resolve }))
+  render(<MemoryRouter initialEntries={['/batch/batch-1']}><Routes>
+    <Route path="/batch/:batchId" element={<BatchDetailPage />} />
+    <Route path="/batch" element={<Link to="/batch/batch-2">打开另一个批次</Link>} />
+  </Routes></MemoryRouter>)
+  await screen.findByText('失败')
+  await userEvent.click(screen.getByRole('button', { name: '重试失败项' }))
+  await userEvent.click(screen.getByRole('link', { name: '批量任务中心' }))
+  await userEvent.click(screen.getByRole('link', { name: '打开另一个批次' }))
+  await screen.findByRole('heading', { name: '另一个批次' })
+  await act(async () => finishMutation(failed))
+  expect(screen.getByRole('heading', { name: '另一个批次' })).toBeTruthy()
+  expect(useBatchStore.getState().active).toEqual(other)
+  expect(getBatch).toHaveBeenCalledTimes(2)
+})

@@ -196,3 +196,30 @@ it('serializes a requested management refresh behind a slow poll and suppresses 
   await tick(9)
   expect(getBatchMock).toHaveBeenCalledTimes(2)
 })
+
+it('serializes shared invalidation behind a pending read and never publishes its stale terminal result', async () => {
+  let resolve!: (detail: BatchDetail) => void
+  getBatchMock.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    .mockResolvedValue(detailWithJob('DOWNLOADING'))
+  renderHook(() => useBatchPolling('batch-1', 10))
+  await tick()
+  const published: string[] = []
+  const unsubscribe = useBatchStore.subscribe(state => {
+    if (state.active) published.push(state.active.jobs[0].status)
+  })
+  try {
+    await act(async () => {
+      useBatchStore.getState().invalidateDetail('batch-1')
+      expect(getBatchMock).toHaveBeenCalledTimes(1)
+      resolve({ ...detailWithJob('FAILED'), status: 'PARTIAL' })
+    })
+    await tick()
+    expect(getBatchMock).toHaveBeenCalledTimes(2)
+    expect(published).not.toContain('FAILED')
+    expect(useBatchStore.getState().active?.jobs[0].status).toBe('DOWNLOADING')
+    await tick(10)
+    expect(getBatchMock).toHaveBeenCalledTimes(3)
+  } finally {
+    unsubscribe()
+  }
+})
