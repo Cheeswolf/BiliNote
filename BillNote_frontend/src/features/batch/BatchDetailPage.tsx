@@ -30,6 +30,9 @@ export default function BatchDetailPage() {
     setError(null)
     try {
       await mutation(batchId)
+      if (useBatchStore.getState().active?.id === batchId) {
+        useBatchStore.getState().setActive(null)
+      }
       // Let the existing polling hook serialize the immediate authoritative refresh.
       setRefresh(value => value + 1)
     } catch (error) { setError(pollingErrorMessage(error)) }

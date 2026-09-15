@@ -1,5 +1,14 @@
 import request from '@/utils/request.ts'
 
+export interface ModelItem {
+  id: string | number
+  model_name: string
+}
+
+export interface EnabledModel extends ModelItem {
+  provider_id: string
+}
+
 // opts.silent: 让本次请求失败时不弹全局红 toast（调用方自行 catch 处理，
 // 比如 onboarding 撞名重试这种预期内失败）
 interface CallOpts { silent?: boolean }
@@ -11,15 +20,15 @@ export const getProviderList = async (opts?: CallOpts) => {
 export const getProviderById = async (id: string) => {
   return await request.get(`/get_provider_by_id/${id}`)
 }
-export const updateProviderById = async (data: any, opts?: CallOpts) => {
+export const updateProviderById = async (data: unknown, opts?: CallOpts) => {
   return await request.post('/update_provider', data, cfg(opts))
 }
 
-export const addProvider = async (data: any, opts?: CallOpts) => {
+export const addProvider = async (data: unknown, opts?: CallOpts) => {
   return await request.post('/add_provider', data, cfg(opts))
 }
 
-export const testConnection = async (data: any, opts?: CallOpts) => {
+export const testConnection = async (data: unknown, opts?: CallOpts) => {
   return await request.post('/connect_test', data, cfg(opts))
 }
 
@@ -28,7 +37,7 @@ export const fetchModels = async (providerId: string) => {
 }
 
 export const fetchEnableModelById = async (id: string) => {
-  return await request.get('/model_enable/' + id)
+  return await request.get<unknown, ModelItem[]>('/model_enable/' + id)
 }
 
 export async function addModel(
@@ -39,7 +48,7 @@ export async function addModel(
 }
 
 export const fetchEnableModels = async () => {
-  return await request.get('/model_list')
+  return await request.get<unknown, EnabledModel[]>('/model_list')
 }
 
 export const deleteModelById = async (modelId: number) => {

@@ -5,7 +5,9 @@ import {
   addModel,
   fetchEnableModels,
   fetchEnableModelById,
-  deleteModelById
+  deleteModelById,
+  type EnabledModel,
+  type ModelItem,
 } from '@/services/model'
 
 interface IModel {
@@ -17,21 +19,14 @@ interface IModel {
   root: string
 }
 
-interface IModelListItem {
-  id: string
-  provider_id: string
-  model_name: string
-  created_at?: string
-}
-
 interface ModelStore {
   models: IModel[]
-  modelList: IModelListItem[]
+  modelList: EnabledModel[]
   loading: boolean
   selectedModel: string
 
   loadModels: (providerId: string) => Promise<void>
-  loadModelsById: (providerId: string) => Promise<IModelListItem[]>
+  loadModelsById: (providerId: string) => Promise<ModelItem[]>
   loadEnabledModels: () => Promise<void>
   addNewModel: (providerId: string, modelId: string) => Promise<void>
   deleteModel: (modelId: number) => Promise<void>
@@ -50,7 +45,7 @@ export const useModelStore = create<ModelStore>()(
     loadEnabledModels: async () => {
       try {
         set({ loading: true })
-        const list = await fetchEnableModels() as unknown as IModelListItem[]
+        const list = await fetchEnableModels()
         set({ modelList: list })
       } catch (error) {
         set({ modelList: [] })

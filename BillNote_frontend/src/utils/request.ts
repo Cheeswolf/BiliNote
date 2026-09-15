@@ -2,6 +2,8 @@ import axios, { AxiosInstance, AxiosResponse } from 'axios';
 import toast from 'react-hot-toast'
 
 // 统一响应类型
+// Axios's interceptor signature does not model data unwrapping; callers type the unwrapped response.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface IResponse<T = any> {
   code: number;
   msg: string;
@@ -40,17 +42,18 @@ request.interceptors.response.use(
       if (!response.config?.suppressToast) {
         toast.error(res.msg || '操作失败，请稍后再试');
       }
-      return Promise.reject(res); // 拒绝Promise，让业务代码可以捕获并处理
+      return Promise.reject({ ...res, status: response.status }); // 拒绝Promise，让业务代码可以捕获并处理
     }
   },
   (error) => {
     const suppress = error?.config?.suppressToast === true
     // 网络/服务器错误
     const res = error?.response?.data as IResponse | undefined;
-    if (res) {
+    if (error?.response) {
       // 如果后端有返回错误信息，则显示后端信息
-      if (!suppress) toast.error(res.msg || '服务器错误，请稍后再试');
-      return Promise.reject(res);
+      if (!suppress) toast.error(res?.msg || '服务器错误，请稍后再试');
+      // Preserve HTTP status while retaining FastAPI detail and legacy envelope fields.
+      return Promise.reject({ ...res, status: error.response.status });
     } else {
       // 没有响应数据（如网络中断），显示通用网络错误
       if (!suppress) toast.error('请求失败，请检查网络连接或稍后再试')

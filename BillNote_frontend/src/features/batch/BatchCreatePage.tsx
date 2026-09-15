@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { v4 as uuid } from 'uuid'
 import { ArrowLeft, ArrowRight, Loader2 } from 'lucide-react'
@@ -20,6 +20,11 @@ const batchSettingsSchema = generationSettingsSchema.extend({
 
 export default function BatchCreatePage() {
   const navigate = useNavigate()
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
   const models = useModelStore(state => state.modelList)
   const [step, setStep] = useState(1)
   const [lines, setLines] = useState('')
@@ -45,8 +50,9 @@ export default function BatchCreatePage() {
       const result = await previewBatch({ lines: lines.split(/\r?\n/).map(line => line.trim()).filter(Boolean), expand_multipart: true })
       setRows(result.items.map(item => ({ id: uuid(), item, selected: item.valid })))
     } catch (error) {
+      if (!mounted.current) return
       setError(pollingErrorMessage(error))
-    } finally { setBusy(false) }
+    } finally { if (mounted.current) setBusy(false) }
   }
   const submit = async () => {
     if (busy || (!attempt.current && !canSubmit)) return
@@ -62,19 +68,21 @@ export default function BatchCreatePage() {
     setError(null)
     try {
       const result = await submitBatch(attempt.current)
+      if (!mounted.current) return
       navigate('/batch/' + encodeURIComponent(result.batch_id), { replace: true })
     } catch (error) {
+      if (!mounted.current) return
       setError(pollingErrorMessage(error))
       // A confirmed request validation rejection created nothing; permit correction.
       // Transport failures and server failures keep the frozen attempt for safe retry.
       if (typeof error === 'object' && error !== null && (
         ('code' in error && (error.code === 400 || error.code === 422)) ||
-        ('detail' in error && Array.isArray(error.detail))
+        ('status' in error && (error.status === 400 || error.status === 422))
       )) {
         attempt.current = null
         setSubmitted(false)
       }
-    } finally { setBusy(false) }
+    } finally { if (mounted.current) setBusy(false) }
   }
   return (
     <BatchShell>

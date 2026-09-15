@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom'
 import { get_task_status } from '@/services/note'
 import { useTaskStore } from '@/store/taskStore'
 import { cancelPending, getBatch, pauseBatch, resumeBatch, retryFailed } from './api'
@@ -134,4 +134,30 @@ it('displays the actual FastAPI error when a batch cannot be loaded', async () =
   mount()
   expect((await screen.findByRole('alert')).textContent).toContain('Batch not found')
   expect(screen.queryByText('生成中')).toBeNull()
+})
+
+it('revalidates after retry, a delayed refresh, and leaving then reopening the detail without overlapping reads', async () => {
+  const failed = { ...detailWithJob('FAILED'), status: 'PARTIAL' as const }
+  const next = detailWithJob('DOWNLOADING')
+  let finishRefresh!: (value: typeof next) => void
+  vi.mocked(getBatch).mockResolvedValueOnce(failed)
+    .mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve }))
+    .mockResolvedValue(next)
+  vi.mocked(retryFailed).mockResolvedValue(detailWithJob('PENDING'))
+  render(<MemoryRouter initialEntries={['/batch/batch-1']}><Routes>
+    <Route path="/batch/:batchId" element={<BatchDetailPage />} />
+    <Route path="/batch" element={<Link to="/batch/batch-1">重新打开批次</Link>} />
+  </Routes></MemoryRouter>)
+  await screen.findByText('失败')
+  await userEvent.click(screen.getByRole('button', { name: '重试失败项' }))
+  await waitFor(() => expect(getBatch).toHaveBeenCalledTimes(2))
+  const cachedAfterMutation = useBatchStore.getState().active
+  await userEvent.click(screen.getByRole('link', { name: '批量任务中心' }))
+  await userEvent.click(screen.getByRole('link', { name: '重新打开批次' }))
+  const readsWhilePreviousIsPending = vi.mocked(getBatch).mock.calls.length
+  await act(async () => finishRefresh(next))
+  expect(cachedAfterMutation?.status).not.toBe('PARTIAL')
+  expect(readsWhilePreviousIsPending).toBe(2)
+  await screen.findByText('下载中')
+  expect(getBatch).toHaveBeenCalledTimes(3)
 })

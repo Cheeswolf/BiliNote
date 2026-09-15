@@ -59,6 +59,7 @@ export default function NoteForm() {
       platform: saved.platform || 'bilibili',
       video_url: saved.video_url || '',
       model_name: saved.model_name || firstModel,
+      provider_id: saved.provider_id,
       style: saved.style || 'minimal',
       quality: saved.quality === 'fast' || saved.quality === 'slow' ? saved.quality : 'medium',
       extras: saved.extras || '',

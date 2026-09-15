@@ -75,8 +75,9 @@ it('backs off on errors, shows reconnecting, and resets delay after success', as
   expect(getBatchMock).toHaveBeenCalledTimes(3)
 })
 it.each(['COMPLETED', 'PARTIAL', 'CANCELLED'] as const)(
-  'stops polling %s batches',
+  'revalidates cached %s batches once per opening then stops polling',
   async status => {
+    useBatchStore.setState({ active: { ...detailWithJob('CANCELLED'), status } })
     getBatchMock.mockResolvedValue({
       ...detailWithJob(status === 'COMPLETED' ? 'SUCCESS' : 'CANCELLED'),
       status,
@@ -125,12 +126,13 @@ it('keeps connectivity online when the server returns an application error', asy
 })
 it('restarts after retry-failed reopens a terminal batch', async () => {
   useBatchStore.setState({ active: { ...detailWithJob('FAILED'), status: 'PARTIAL' } })
+  getBatchMock.mockResolvedValueOnce({ ...detailWithJob('FAILED'), status: 'PARTIAL' })
   renderHook(() => useBatchPolling('batch-1', 10))
   await tick()
-  expect(getBatchMock).not.toHaveBeenCalled()
+  expect(getBatchMock).toHaveBeenCalledTimes(1)
   await act(async () => useBatchStore.getState().setActive(detailWithJob('PENDING')))
   await tick()
-  expect(getBatchMock).toHaveBeenCalledTimes(1)
+  expect(getBatchMock).toHaveBeenCalledTimes(2)
 })
 
 it('serializes StrictMode effect replay and ignores the cleaned-up response', async () => {
@@ -151,6 +153,7 @@ it('serializes StrictMode effect replay and ignores the cleaned-up response', as
 it('does not leave duplicate timers when retry reopens a batch during result import', async () => {
   let resolve!: (result: typeof successfulResult) => void
   useBatchStore.setState({ active: { ...detailWithJob('SUCCESS'), status: 'COMPLETED' } })
+  getBatchMock.mockResolvedValueOnce({ ...detailWithJob('SUCCESS'), status: 'COMPLETED' })
   vi.mocked(get_task_status).mockReturnValueOnce(
     new Promise(r => {
       resolve = r
@@ -161,7 +164,7 @@ it('does not leave duplicate timers when retry reopens a batch during result imp
   await act(async () => useBatchStore.getState().setActive(detailWithJob('PENDING')))
   await act(async () => resolve(successfulResult))
   await tick(20)
-  expect(getBatchMock).toHaveBeenCalledTimes(2)
+  expect(getBatchMock).toHaveBeenCalledTimes(3)
 })
 it('stays online when a terminal result is missing and leaves the task unimported', async () => {
   getBatchMock.mockResolvedValue({ ...detailWithJob('SUCCESS'), status: 'COMPLETED' })

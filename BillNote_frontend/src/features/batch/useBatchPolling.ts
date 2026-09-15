@@ -1,24 +1,26 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { isPollingNetworkError, pollingErrorMessage } from '@/utils/polling'
 import { getBatch } from './api'
 import { useBatchStore } from './store'
 import { isTerminalBatch } from './types'
 import type { BatchDetail } from './types'
 
+// Keep a single request/import lane across detail unmounts and remounts.
+let inFlight: Promise<void> | null = null
+
 export const useBatchPolling = (batchId: string | null | undefined, interval = 3000, refreshKey = 0) => {
-  const inFlight = useRef<Promise<void> | null>(null)
   useEffect(() => {
     if (!batchId) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     let failures = 0
     const baseDelay = Math.max(1, interval)
-    const cached = useBatchStore.getState().active
-    let completed: BatchDetail | null =
-      refreshKey === 0 && cached?.id === batchId && isTerminalBatch(cached.status) ? cached : null
+    // Every opening revalidates once; only this effect's verified terminal detail
+    // may be reused for result-import retries.
+    let completed: BatchDetail | null = null
     const poll = async () => {
       // Keep a changing selection and React StrictMode from overlapping requests.
-      while (inFlight.current) await inFlight.current
+      while (inFlight) await inFlight
       if (cancelled) return
       const run = async () => {
         let retry = false
@@ -51,9 +53,9 @@ export const useBatchPolling = (batchId: string | null | undefined, interval = 3
         }
       }
       const request = run()
-      inFlight.current = request
+      inFlight = request
       await request
-      if (inFlight.current === request) inFlight.current = null
+      if (inFlight === request) inFlight = null
     }
     const unsubscribe = useBatchStore.subscribe((state, previous) => {
       if (
@@ -66,7 +68,7 @@ export const useBatchPolling = (batchId: string | null | undefined, interval = 3
         failures = 0
         clearTimeout(timer)
         // An active cycle will schedule the next poll after its import settles.
-        if (!inFlight.current) void poll()
+        if (!inFlight) void poll()
       }
     })
     void poll()

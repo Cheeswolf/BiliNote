@@ -3,12 +3,13 @@ import { Link } from 'react-router-dom'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { noteFormats, noteStyles } from '@/constant/note'
+import type { EnabledModel } from '@/services/model'
 import type { GenerationSettingsValues } from './generationSettingsSchema'
 
 interface Props {
   value: GenerationSettingsValues
   onChange: (patch: Partial<GenerationSettingsValues>) => void
-  models: { id: string; model_name: string; provider_id: string }[]
+  models: EnabledModel[]
   onRefreshModels: () => void
   platform?: string
   disabled?: boolean

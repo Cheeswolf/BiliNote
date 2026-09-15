@@ -1,5 +1,5 @@
-import { beforeEach, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { useModelStore } from '@/store/modelStore'
@@ -7,12 +7,16 @@ import { fetchEnableModels } from '@/services/model'
 import { previewBatch, submitBatch } from './api'
 import type { BatchPreviewItem } from './types'
 import BatchCreatePage from './BatchCreatePage'
+import { AxiosError } from 'axios'
+import request from '@/utils/request'
 
 vi.mock('./api', () => ({ previewBatch: vi.fn(), submitBatch: vi.fn() }))
 vi.mock('@/services/model', () => ({
   fetchEnableModels: vi.fn(), fetchModels: vi.fn(), addModel: vi.fn(),
   fetchEnableModelById: vi.fn(), deleteModelById: vi.fn(),
 }))
+const originalAdapter = request.defaults.adapter
+afterEach(() => { request.defaults.adapter = originalAdapter })
 const item = (n: number): BatchPreviewItem => ({
   original_url: 'https://b23.tv/a', normalized_url: 'https://www.bilibili.com/video/BV1test?p=' + n,
   platform: 'bilibili', resource_key: 'bilibili:BV1test:p' + n, title: '课程 · P' + n,
@@ -25,6 +29,7 @@ const invalid: BatchPreviewItem = {
 const mount = () => render(
   <MemoryRouter initialEntries={['/batch/new']}><Routes>
     <Route path="/batch/new" element={<BatchCreatePage />} />
+    <Route path="/batch" element={<p>任务中心列表</p>} />
     <Route path="/batch/:batchId" element={<p>批次已创建</p>} />
   </Routes></MemoryRouter>
 )
@@ -32,7 +37,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   const models = [{ id: 'model-1', provider_id: 'provider-1', model_name: 'test-model' }]
   useModelStore.setState({ modelList: models })
-  vi.mocked(fetchEnableModels).mockResolvedValue(models as never)
+  vi.mocked(fetchEnableModels).mockResolvedValue(models)
   vi.mocked(previewBatch).mockResolvedValue({ items: [item(1), item(2), item(3), invalid] })
   vi.mocked(submitBatch).mockResolvedValue({ batch_id: 'created', task_ids: ['a', 'b'] })
 })
@@ -119,7 +124,7 @@ it('shows parse failures and permits retry without leaving stale selections', as
 })
 it('requires a configured model and validates video-understanding numeric settings', async () => {
   useModelStore.setState({ modelList: [] })
-  vi.mocked(fetchEnableModels).mockResolvedValue([] as never)
+  vi.mocked(fetchEnableModels).mockResolvedValue([])
   mount()
   await parse()
   await userEvent.click(screen.getByRole('button', { name: '下一步' }))
@@ -151,8 +156,8 @@ it('selects numeric model IDs and preserves provider identity when names are sha
     { id: 1, provider_id: 'provider-1', model_name: 'shared-model' },
     { id: 2, provider_id: 'provider-2', model_name: 'shared-model' },
   ]
-  useModelStore.setState({ modelList: models as never })
-  vi.mocked(fetchEnableModels).mockResolvedValue(models as never)
+  useModelStore.setState({ modelList: models })
+  vi.mocked(fetchEnableModels).mockResolvedValue(models)
   mount()
   await parse()
   await userEvent.click(screen.getByRole('button', { name: '下一步' }))
@@ -189,7 +194,7 @@ it('blocks out-of-range intervals and noninteger grid sizes before submitting', 
 })
 
 it('displays FastAPI validation reasons and unlocks settings for correction', async () => {
-  vi.mocked(submitBatch).mockRejectedValueOnce({ detail: [
+  vi.mocked(submitBatch).mockRejectedValueOnce({ status: 422, detail: [
     { loc: ['body', 'settings', 'provider_id'], type: 'string_type', msg: 'Input should be a valid string' },
   ] })
   mount()
@@ -206,4 +211,77 @@ it('rejects fractional sampling intervals required to be integers by the batch A
   await userEvent.click(screen.getByRole('checkbox', { name: '启用视频理解' }))
   fireEvent.change(screen.getByLabelText('采样间隔（秒）'), { target: { value: '1.5' } })
   expect((screen.getByRole('button', { name: '开始生成 3 条笔记' }) as HTMLButtonElement).disabled).toBe(true)
+})
+
+it.each([
+  { status: 400, detail: 'Provider is disabled' },
+  { status: 422, detail: 'Invalid generation settings' },
+  { status: 422, detail: [{ loc: ['body', 'settings', 'provider_id'], type: 'string_type', msg: 'Input should be a valid string' }] },
+])('releases the attempt after actual HTTP $status validation through the request interceptor', async ({ status, detail }) => {
+  const api = await vi.importActual<typeof import('./api')>('./api')
+  vi.mocked(submitBatch).mockImplementation(api.submitBatch)
+  const sent: string[] = []
+  request.defaults.adapter = async config => {
+    sent.push(config.data)
+    if (sent.length === 1) {
+      throw new AxiosError('Request failed', AxiosError.ERR_BAD_REQUEST, config, undefined, {
+        status, statusText: 'Validation rejected', headers: {}, config, data: { detail },
+      })
+    }
+    return { status: 200, statusText: 'OK', headers: {}, config, data: {
+      code: 0, msg: 'ok', data: { batch_id: 'created', task_ids: ['a'] },
+    } }
+  }
+  mount()
+  await parse()
+  await userEvent.click(screen.getByRole('button', { name: '下一步' }))
+  await userEvent.click(screen.getByRole('button', { name: '开始生成 3 条笔记' }))
+  expect((await screen.findByRole('alert')).textContent).toContain(typeof detail === 'string' ? detail : detail[0].msg)
+  const name = screen.getByLabelText('批次名称') as HTMLInputElement
+  expect(name.disabled).toBe(false)
+  fireEvent.change(name, { target: { value: '修正后的批次' } })
+  await userEvent.click(screen.getByRole('button', { name: '开始生成 3 条笔记' }))
+  await screen.findByText('批次已创建')
+  expect(JSON.parse(sent[1]).request_id).not.toBe(JSON.parse(sent[0]).request_id)
+  expect(JSON.parse(sent[1]).name).toBe('修正后的批次')
+})
+
+it.each([500, undefined])('keeps the exact attempt for an unknown outcome with status %s through the interceptor', async status => {
+  const api = await vi.importActual<typeof import('./api')>('./api')
+  vi.mocked(submitBatch).mockImplementation(api.submitBatch)
+  const sent: string[] = []
+  request.defaults.adapter = async config => {
+    sent.push(config.data)
+    if (sent.length === 1) {
+      throw new AxiosError('Request failed', AxiosError.ERR_NETWORK, config, undefined,
+        status ? { status, statusText: 'Server error', headers: {}, config,
+          data: { detail: [{ msg: 'Unable to confirm creation' }] } } : undefined)
+    }
+    return { status: 200, statusText: 'OK', headers: {}, config, data: {
+      code: 0, msg: 'ok', data: { batch_id: 'created', task_ids: ['a'] },
+    } }
+  }
+  mount()
+  await parse()
+  await userEvent.click(screen.getByRole('button', { name: '下一步' }))
+  await userEvent.click(screen.getByRole('button', { name: '开始生成 3 条笔记' }))
+  await screen.findByRole('alert')
+  expect((screen.getByLabelText('批次名称') as HTMLInputElement).disabled).toBe(true)
+  await userEvent.click(screen.getByRole('button', { name: '重试提交' }))
+  await screen.findByText('批次已创建')
+  expect(sent[1]).toBe(sent[0])
+})
+
+it('does not navigate away from the user destination when a submit succeeds after leaving', async () => {
+  let finish!: (result: { batch_id: string; task_ids: string[] }) => void
+  vi.mocked(submitBatch).mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+  mount()
+  await parse()
+  await userEvent.click(screen.getByRole('button', { name: '下一步' }))
+  await userEvent.click(screen.getByRole('button', { name: '开始生成 3 条笔记' }))
+  await userEvent.click(screen.getByRole('link', { name: '批量任务中心' }))
+  await screen.findByText('任务中心列表')
+  await act(async () => finish({ batch_id: 'created', task_ids: ['a'] }))
+  expect(screen.getByText('任务中心列表')).toBeTruthy()
+  expect(screen.queryByText('批次已创建')).toBeNull()
 })
