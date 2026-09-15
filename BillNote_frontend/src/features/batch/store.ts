@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import toast from 'react-hot-toast'
+import { batchLabels } from './presentation'
 import { ResultUnavailableError, TaskStorageError } from '@/utils/polling'
 import { get_task_status } from '@/services/note'
 import { ensureTaskHistoryHydrated, useTaskStore } from '@/store/taskStore'
@@ -11,6 +13,8 @@ interface BatchStore {
   error: string | null
   importedTaskIds: Record<string, true>
   detailRevisions: Record<string, number>
+  notifiedTerminalOutcomes: Record<string, string[]>
+  notifyTerminalOutcome: (detail: BatchDetail) => void
   invalidateDetail: (batchId: string) => void
   setActive: (detail: BatchDetail | null) => void
   setList: (list: BatchList) => void
@@ -81,13 +85,36 @@ const importJob = async (job: BatchJobSummary) => {
     }))
   }
 }
-export const useBatchStore = create<BatchStore>(set => ({
+export const useBatchStore = create<BatchStore>((set, get) => ({
   active: null,
   list: null,
   connection: 'online',
   error: null,
   importedTaskIds: {},
   detailRevisions: {},
+  notifiedTerminalOutcomes: {},
+  notifyTerminalOutcome: detail => {
+    if (detail.status !== 'COMPLETED' && detail.status !== 'PARTIAL') return
+    // Server revision and attempts identify the result even when a fast retry
+    // finishes between reads. Local refresh counters must not replay a toast.
+    const outcome = JSON.stringify([
+      detail.status, detail.updated_at,
+      [...detail.jobs].sort((a, b) => a.position - b.position)
+        .map(job => [job.task_id, job.attempt, job.status]),
+    ])
+    const notified = get().notifiedTerminalOutcomes[detail.id] ?? []
+    if (notified.includes(outcome)) return
+    // Claim synchronously before notifying so overlapping mounts cannot repeat it.
+    set(state => ({
+      notifiedTerminalOutcomes: {
+        ...state.notifiedTerminalOutcomes, [detail.id]: [...notified, outcome],
+      },
+    }))
+    const counts = detail.counts
+    const message = `批次“${detail.name}”${batchLabels[detail.status]}：成功 ${counts.SUCCESS} / ${detail.total}，失败 ${counts.FAILED}，中断 ${counts.INTERRUPTED}，取消 ${counts.CANCELLED}`
+    if (detail.status === 'COMPLETED') toast.success(message)
+    else toast(message, { icon: '⚠️' })
+  },
   invalidateDetail: batchId => set(state => ({
     active: state.active?.id === batchId ? null : state.active,
     detailRevisions: {

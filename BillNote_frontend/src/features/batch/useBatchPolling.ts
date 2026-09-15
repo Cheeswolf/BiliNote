@@ -34,6 +34,7 @@ export const useBatchPolling = (batchId: string | null | undefined, interval = 3
           if (isStale()) return
           useBatchStore.setState({ active: detail, connection: 'online', error: null })
           if (isTerminalBatch(detail.status)) completed = detail
+          useBatchStore.getState().notifyTerminalOutcome(detail)
           await useBatchStore.getState().importSuccessfulTasks(detail)
           failures = 0
           retry = !completed

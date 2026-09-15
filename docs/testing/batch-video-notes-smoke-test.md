@@ -2,7 +2,7 @@
 
 Date: 2026-09-15 (Asia/Shanghai). Branch: `feature/batch-video-notes`.
 Production-code baseline: `6cc6be320ff65b46630cf371453d976e5557e866`.
-Task 9 adds the integration test and this record; it does not change production code.
+The original Task 9 commit adds the integration test and this record. The notification follow-up below also changes frontend production code.
 
 ## Acceptance status
 
@@ -51,6 +51,56 @@ The build is `vite build`, not a Tauri binary build or a full-app TypeScript che
 Existing build warnings concern old Browserslist data, lottie-web `eval`, and
 chunks over 500 kB. Tests also print an existing single-note retry fixture.
 No new lint diagnostic was introduced by Task 9.
+
+## Notification follow-up verification (starting HEAD `3f5b894`)
+
+The missing final notification is now implemented. After a verified detail read
+returns `COMPLETED` or `PARTIAL`, polling sends one Chinese summary containing the
+batch name, status, successes/total, failures, interruptions, and cancellations.
+`BatchProgress` remains visible. Successful note imports do not emit per-video
+success popups. The summary describes backend completion independently of result
+import availability; import retries continue normally.
+
+The shared batch store remembers terminal outcome fingerprints separately for
+each batch: terminal status, server `updated_at`, and ordered task IDs, attempts,
+and statuses. Repeated responses, terminal import retries, StrictMode, detail
+remount/reopen, and unchanged cache revalidation do not repeat the notification.
+A new terminal server revision or attempt can notify again, including a retry
+that finishes between polls with unchanged counts. Stale invalidated reads do
+not notify. Paused, recoverable, and cancelled batches do not emit completion.
+This deduplication survives route navigation within the current app session;
+the in-memory batch store does not persist notifications across a full app reload.
+
+TDD evidence: before production edits, five notification tests failed because no
+toasts were emitted; three non-completion tests passed. The first fixture was then
+corrected to advance server state explicitly (StrictMode legitimately reads twice),
+and tests were extended to cover a server-only revision and stale read. Tests use
+real toast state, batch/task stores, and both polling hooks; only network calls and
+the existing test IndexedDB boundary are mocked.
+
+Run from `BillNote_frontend/`:
+
+```powershell
+npm test -- --run src/features/batch/useBatchNotifications.test.tsx src/features/batch/useBatchPolling.test.tsx src/features/batch/store.test.ts
+npm test -- --run
+npx tsc -p tsconfig.batch.json --noEmit
+npx eslint src/features/batch/store.ts src/features/batch/useBatchPolling.ts src/features/batch/useBatchNotifications.test.tsx
+npm run build
+```
+
+| Follow-up check | Observed result on 2026-09-15 | Exit |
+| --- | --- | --- |
+| Initial focused regression run | 31 passed across 3 suites, before two added cases | 0 |
+| Final notification suite | 10 passed in 3.76s | 0 |
+| Complete frontend suite | 82 passed across 10 suites in 12.23s | 0 |
+| Scoped TypeScript | No diagnostics | 0 |
+| Changed-file ESLint | No diagnostics | 0 |
+| Production frontend build | 17,799 modules; built in 56.40s, existing warnings | 0 |
+| Recovery integration rerun | 1 passed in 11.88s | 0 |
+
+Backend production files are unchanged. The earlier full backend/lint results
+remain historical evidence; only recovery integration and scoped lint were rerun
+for this follow-up. Real-video and desktop acceptance below remain NOT PERFORMED.
 
 ## Recovery test scope and observed trace
 
@@ -114,11 +164,7 @@ Static inspection confirmed an existing readiness issue:
 reliable readiness result. It did not block the isolated automated suite and was
 not changed in this task. Actual readiness must be established before live runs.
 
-The specification also asks for one final batch summary notification and no
-per-success notification stream. Static inspection finds the persistent
-`BatchProgress` summary but no batch completion-toast path in the batch
-pages/store/polling. The once-only notification requirement is **not verified**;
-do not count the persistent progress summary alone as proof of it.
+The previously identified missing batch summary notification is addressed by the notification follow-up above. Its automated coverage is separate from the live UI acceptance procedures below.
 
 ## Manual three-item workflow — NOT PERFORMED
 
@@ -154,7 +200,9 @@ be verified; a subtitle-only run does not test the transcriber.
    third starts without a retry/resume click. Confirm two real successful notes,
    `PARTIAL`, success 2 / failure 1 / waiting 0 / interrupted 0, and ended 3 / 3.
    Check the specification's single final summary notification and absence of
-   per-item success toasts. Record a missing or repeated notification as a failure.
+   per-item success toasts. Reopen the detail route within the same app session and
+   confirm no repeated summary. Retry failed items and confirm exactly one new
+   summary when that attempt ends. Record a missing or repeated notification as a failure.
 6. Record relative result paths and hashes. Confirm distinct
    `data/tasks/<task_id>/` directories, matching result task IDs, and the intended
    multipart content rather than the first part or entire multipart video.
