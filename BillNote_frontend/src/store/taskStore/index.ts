@@ -78,11 +78,13 @@ export interface Task {
 
 interface TaskStore {
   tasks: Task[]
+  // Durable acknowledgements survive removeTask/clearTasks. Attempts increase on retry.
+  batchImportedAttempts: Record<string, number>
   currentTaskId: string | null
   storageError: string | null
   connections: Record<string, TaskConnection>
   setTaskConnection: (id: string, connection: TaskConnection) => void
-  importCompletedTask: (task: Task) => void
+  importCompletedTask: (task: Task, batchAttempt: number) => Promise<void>
   addPendingTask: (taskId: string, platform: string, formData?: Task['formData']) => void
   updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
   removeTask: (id: string) => void
@@ -92,7 +94,7 @@ interface TaskStore {
   retryTask: (id: string, payload?: Task['formData']) => Promise<void>
 }
 
-type PersistedTaskState = Pick<TaskStore, 'tasks' | 'currentTaskId'>
+type PersistedTaskState = Pick<TaskStore, 'tasks' | 'currentTaskId' | 'batchImportedAttempts'>
 const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', PersistedTaskState]]> = (
   setTransient,
   getState,
@@ -110,10 +112,11 @@ const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', Persiste
           )
         )
           return
-        persistSet(next)
+        return persistSet(next)
       }
       return {
         tasks: [],
+        batchImportedAttempts: {},
         currentTaskId: null,
         connections: {},
         storageError: null,
@@ -122,16 +125,32 @@ const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', Persiste
           // Use the original Zustand setter: transient state must not call persist.setItem.
           setTransient(state => ({ connections: { ...state.connections, [id]: connection } }))
         },
-        importCompletedTask: task =>
-          set(state => {
-            const existing = state.tasks.find(t => t.id === task.id)
-            if (existing?.status === 'SUCCESS') return state
-            return {
-              tasks: existing
-                ? state.tasks.map(t => (t.id === task.id ? { ...task, createdAt: t.createdAt } : t))
-                : [task, ...state.tasks],
-            }
-          }),
+        importCompletedTask: async (task, batchAttempt) => {
+          const previousAttempt = get().batchImportedAttempts[task.id]
+          if (previousAttempt >= batchAttempt) return
+          try {
+            // One persisted snapshot commits the note and its acknowledgement together.
+            await set(state => {
+              const existing = state.tasks.find(t => t.id === task.id)
+              return {
+                tasks: existing?.status === 'SUCCESS' && previousAttempt === undefined
+                  ? state.tasks
+                  : existing
+                    ? state.tasks.map(t => t.id === task.id ? { ...task, createdAt: t.createdAt } : t)
+                    : [task, ...state.tasks],
+                batchImportedAttempts: { ...state.batchImportedAttempts, [task.id]: batchAttempt },
+              }
+            })
+          } catch (error) {
+            // A failed write is still owed. Keep the in-memory note but retry its commit.
+            const attempts = { ...get().batchImportedAttempts }
+            if (previousAttempt === undefined) delete attempts[task.id]
+            else attempts[task.id] = previousAttempt
+            setTransient({ batchImportedAttempts: attempts })
+            throw new TaskStorageError('Task history storage unavailable: ' +
+              (error instanceof Error ? error.message : String(error)))
+          }
+        },
 
         addPendingTask: (
           taskId,
@@ -315,13 +334,15 @@ const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', Persiste
           ...current,
           ...saved,
           connections: {},
+          batchImportedAttempts: saved?.batchImportedAttempts ?? {},
           tasks: (saved?.tasks ?? current.tasks).map(task => ({
             ...task,
             status: (task.status as string) === 'FAILD' ? 'FAILED' : task.status,
           })),
         }
       },
-      partialize: state => ({ tasks: state.tasks, currentTaskId: state.currentTaskId }),
+      partialize: state => ({ tasks: state.tasks, currentTaskId: state.currentTaskId,
+        batchImportedAttempts: state.batchImportedAttempts }),
       storage: createJSONStorage(() => ({
         getItem: async (name: string): Promise<string | null> => {
           const value = await get(name)

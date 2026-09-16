@@ -9,12 +9,20 @@ import type { BatchPreviewItem } from './types'
 import BatchCreatePage from './BatchCreatePage'
 import { AxiosError } from 'axios'
 import request from '@/utils/request'
+import toast, { useToasterStore } from 'react-hot-toast'
+import { useBatchStore } from './store'
+import { useTaskStore } from '@/store/taskStore'
+import { get_task_status } from '@/services/note'
+import { getBatch } from './api'
+import { useBatchPolling } from './useBatchPolling'
+import { detailWithJob, successfulResult } from './testFixtures'
 
-vi.mock('./api', () => ({ previewBatch: vi.fn(), submitBatch: vi.fn() }))
+vi.mock('./api', () => ({ previewBatch: vi.fn(), submitBatch: vi.fn(), getBatch: vi.fn() }))
 vi.mock('@/services/model', () => ({
   fetchEnableModels: vi.fn(), fetchModels: vi.fn(), addModel: vi.fn(),
   fetchEnableModelById: vi.fn(), deleteModelById: vi.fn(),
 }))
+vi.mock('@/services/note', () => ({ get_task_status: vi.fn(), generateNote: vi.fn(), delete_task: vi.fn() }))
 const originalAdapter = request.defaults.adapter
 afterEach(() => { request.defaults.adapter = originalAdapter })
 const item = (n: number): BatchPreviewItem => ({
@@ -33,8 +41,13 @@ const mount = () => render(
     <Route path="/batch/:batchId" element={<p>批次已创建</p>} />
   </Routes></MemoryRouter>
 )
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks()
+  toast.remove()
+  localStorage.clear()
+  useBatchStore.setState(useBatchStore.getInitialState(), true)
+  await useTaskStore.persist.rehydrate()
+  useTaskStore.setState({ tasks: [], currentTaskId: null, batchImportedAttempts: {} })
   const models = [{ id: 'model-1', provider_id: 'provider-1', model_name: 'test-model' }]
   useModelStore.setState({ modelList: models })
   vi.mocked(fetchEnableModels).mockResolvedValue(models)
@@ -284,4 +297,38 @@ it('does not navigate away from the user destination when a submit succeeds afte
   await act(async () => finish({ batch_id: 'created', task_ids: ['a'] }))
   expect(screen.getByText('任务中心列表')).toBeTruthy()
   expect(screen.queryByText('批次已创建')).toBeNull()
+  expect(useBatchStore.getState().outcomeReceipts?.find(receipt => receipt.batchId === 'created')?.tracked).toBe(true)
+})
+
+it.each(['SUCCESS', 'FAILED'] as const)('announces an immediate %s before any nonterminal detail read', async status => {
+  const detail = { ...detailWithJob(status, 'created'), status: status === 'SUCCESS' ? 'COMPLETED' as const : 'PARTIAL' as const }
+  vi.mocked(getBatch).mockResolvedValue(detail)
+  vi.mocked(get_task_status).mockResolvedValue(successfulResult)
+  function TerminalPage() {
+    useBatchPolling('created', 10)
+    const { toasts } = useToasterStore()
+    return <p>{toasts.length ? String(toasts[0].message) : 'No summary'}</p>
+  }
+  render(<MemoryRouter initialEntries={['/batch/new']}><Routes>
+    <Route path="/batch/new" element={<BatchCreatePage />} />
+    <Route path="/batch/:batchId" element={<TerminalPage />} />
+  </Routes></MemoryRouter>)
+  await parse()
+  await userEvent.click(screen.getByRole('button', { name: '下一步' }))
+  await userEvent.click(screen.getByRole('button', { name: '开始生成 3 条笔记' }))
+  await screen.findByText(/成功.*失败/)
+  await waitFor(() => expect(useTaskStore.getState().tasks).toHaveLength(status === 'SUCCESS' ? 1 : 0))
+})
+
+it('does not track an abandoned submission whose server creation was never confirmed', async () => {
+  let reject!: (error: Error) => void
+  vi.mocked(submitBatch).mockReturnValueOnce(new Promise((_resolve, fail) => { reject = fail }))
+  mount()
+  await parse()
+  await userEvent.click(screen.getByRole('button', { name: '下一步' }))
+  await userEvent.click(screen.getByRole('button', { name: '开始生成 3 条笔记' }))
+  await userEvent.click(screen.getByRole('link', { name: '批量任务中心' }))
+  await act(async () => reject(new Error('connection lost')))
+  expect(screen.getByText('任务中心列表')).toBeTruthy()
+  expect(useBatchStore.getState().outcomeReceipts ?? []).toEqual([])
 })

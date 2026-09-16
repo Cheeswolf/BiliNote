@@ -21,7 +21,7 @@ const mount = () => render(
 beforeEach(async () => {
   vi.clearAllMocks()
   await useTaskStore.persist.rehydrate()
-  useTaskStore.setState({ tasks: [], currentTaskId: null })
+  useTaskStore.setState({ tasks: [], currentTaskId: null, batchImportedAttempts: {} })
   useBatchStore.setState(useBatchStore.getInitialState(), true)
   vi.mocked(getBatch).mockResolvedValue(detailWithJob())
   vi.mocked(get_task_status).mockResolvedValue(successfulResult)

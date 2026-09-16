@@ -9,6 +9,7 @@ import { useModelStore } from '@/store/modelStore'
 import { pollingErrorMessage } from '@/utils/polling'
 import { generationDefaults, generationSettingsSchema } from '@/pages/HomePage/components/generationSettingsSchema'
 import { previewBatch, submitBatch } from './api'
+import { useBatchStore } from './store'
 import type { BatchSubmitRequest } from './types'
 import BatchShell from './BatchShell'
 import BatchSettings from './BatchSettings'
@@ -68,6 +69,8 @@ export default function BatchCreatePage() {
     setError(null)
     try {
       const result = await submitBatch(attempt.current)
+      // A confirmed server batch remains ours after navigation, even if submit was slow.
+      useBatchStore.getState().trackSubmittedBatch(result.batch_id)
       if (!mounted.current) return
       navigate('/batch/' + encodeURIComponent(result.batch_id), { replace: true })
     } catch (error) {

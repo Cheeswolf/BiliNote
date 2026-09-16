@@ -31,7 +31,7 @@ beforeEach(async () => {
   toast.remove()
   localStorage.clear()
   await useTaskStore.persist.rehydrate()
-  useTaskStore.setState({ tasks: [], currentTaskId: null })
+  useTaskStore.setState({ tasks: [], currentTaskId: null, batchImportedAttempts: {} })
   useBatchStore.setState(useBatchStore.getInitialState(), true)
   useBatchStore.getState().notifyTerminalOutcome(detailWithJob())
   vi.mocked(getBatch).mockReset().mockResolvedValue(terminal())

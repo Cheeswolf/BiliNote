@@ -12,8 +12,9 @@ vi.mock('@/services/note', () => ({
 }))
 const getResult = vi.mocked(get_task_status)
 beforeEach(async () => {
+  localStorage.clear()
   await useTaskStore.persist.rehydrate()
-  useTaskStore.setState({ tasks: [], currentTaskId: null, connections: {} })
+  useTaskStore.setState({ tasks: [], currentTaskId: null, connections: {}, batchImportedAttempts: {} })
   useBatchStore.setState(useBatchStore.getInitialState(), true)
 })
 describe('batch imports', () => {
@@ -117,7 +118,7 @@ it('blocks imports and pending-task writes after a real persist hydration read f
     state: { tasks: oldTasks, currentTaskId: 'existing-note' },
   })
   const originalHistory = persisted
-  useTaskStore.setState({ tasks: [], currentTaskId: null })
+  useTaskStore.setState({ tasks: [], currentTaskId: null, batchImportedAttempts: {} })
   const originalStorage = useTaskStore.persist.getOptions().storage
   let unavailable = true
   const write = vi.fn(async (_name: string, value: string) => {
@@ -200,4 +201,64 @@ it('retrieves results with peak concurrency one across concurrent batches, conti
   failSecond = false
   await useBatchStore.getState().importSuccessfulTasks(detail)
   expect(calls).toEqual(['task-1', 'task-2', 'task-3', 'task-4', 'task-2'])
+})
+
+
+it('waits for durable note and acknowledgement storage, and retains the import obligation after a failed write', async () => {
+  const originalStorage = useTaskStore.persist.getOptions().storage
+  let persisted: string | null = null
+  let rejectWrite!: (error: Error) => void
+  let writing = false
+  let fail = true
+  useTaskStore.persist.setOptions({ storage: createJSONStorage(() => ({
+    getItem: async () => persisted,
+    removeItem: async () => {},
+    setItem: async (_key, value) => {
+      if (fail) {
+        writing = true
+        await new Promise<void>((_resolve, reject) => { rejectWrite = reject })
+      }
+      persisted = value
+    },
+  })) })
+  try {
+    getResult.mockResolvedValue(successfulResult)
+    useBatchStore.getState().notifyTerminalOutcome(detailWithJob())
+    const completed = { ...detailWithJob('SUCCESS'), status: 'COMPLETED' as const }
+    useBatchStore.getState().notifyTerminalOutcome(completed)
+    let settled = false
+    const importing = useBatchStore.getState().importSuccessfulTasks(completed)
+    const outcome = importing.then(() => { settled = true }, error => { settled = true; return error })
+    await vi.waitFor(() => expect(writing).toBe(true))
+    expect(settled).toBe(false)
+    expect(useBatchStore.getState().outcomeReceipts?.[0].importPending).toBe(true)
+    rejectWrite(new Error('disk unavailable'))
+    expect(await outcome).toMatchObject({ message: expect.stringContaining('disk unavailable') })
+    expect(useTaskStore.getState().batchImportedAttempts['task-1']).toBeUndefined()
+    expect(useBatchStore.getState().outcomeReceipts?.[0].importPending).toBe(true)
+    expect(persisted).toBeNull()
+    fail = false
+    await useBatchStore.getState().importSuccessfulTasks(completed)
+    expect(JSON.parse(persisted!).state).toMatchObject({
+      tasks: [{ id: 'task-1', status: 'SUCCESS' }], batchImportedAttempts: { 'task-1': 1 },
+    })
+    expect(useBatchStore.getState().outcomeReceipts?.[0].importPending).toBe(false)
+  } finally {
+    useTaskStore.persist.setOptions({ storage: originalStorage })
+    await useTaskStore.persist.rehydrate()
+  }
+})
+
+it('imports the content of a new successful attempt once even when the previous note still exists', async () => {
+  getResult.mockResolvedValue(successfulResult)
+  const detail = detailWithJob('SUCCESS')
+  await useBatchStore.getState().importSuccessfulTasks(detail)
+  getResult.mockResolvedValue({ ...successfulResult, result: { ...successfulResult.result, markdown: '# New attempt' } })
+  const retried = { ...detail, jobs: [{ ...detail.jobs[0], attempt: 2 }] }
+  await useBatchStore.getState().importSuccessfulTasks(retried)
+  await useTaskStore.persist.rehydrate()
+  useBatchStore.setState(useBatchStore.getInitialState(), true)
+  await useBatchStore.getState().importSuccessfulTasks(retried)
+  expect(useTaskStore.getState().tasks[0].markdown).toMatchObject([{ content: '# New attempt' }])
+  expect(getResult).toHaveBeenCalledTimes(2)
 })

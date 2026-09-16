@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import toast from 'react-hot-toast'
-import { readOutcomeReceipts, recordBatchOutcome } from './outcomeReceipts'
+import { acknowledgeBatchImports, readOutcomeReceipts, recordBatchOutcome, trackSubmittedBatch } from './outcomeReceipts'
 import type { OutcomeReceipt } from './outcomeReceipts'
 import { batchLabels } from './presentation'
 import { ResultUnavailableError, TaskStorageError } from '@/utils/polling'
@@ -13,9 +13,9 @@ interface BatchStore {
   list: BatchList | null
   connection: ConnectionStatus
   error: string | null
-  importedTaskIds: Record<string, true>
   detailRevisions: Record<string, number>
   outcomeReceipts: OutcomeReceipt[] | null
+  trackSubmittedBatch: (batchId: string) => void
   notifyTerminalOutcome: (detail: BatchDetail) => void
   invalidateDetail: (batchId: string) => void
   setActive: (detail: BatchDetail | null) => void
@@ -27,13 +27,11 @@ interface BatchStore {
 let importQueue: Promise<void> = Promise.resolve()
 const importJob = async (job: BatchJobSummary) => {
   await ensureTaskHistoryHydrated()
-  if (useBatchStore.getState().importedTaskIds[job.task_id]) return
-  if (
-    useTaskStore.getState().tasks.some(task => task.id === job.task_id && task.status === 'SUCCESS')
-  ) {
-    useBatchStore.setState(state => ({
-      importedTaskIds: { ...state.importedTaskIds, [job.task_id]: true },
-    }))
+  const previousAttempt = useTaskStore.getState().batchImportedAttempts[job.task_id]
+  if (previousAttempt >= job.attempt) return
+  const existing = useTaskStore.getState().tasks.find(task => task.id === job.task_id && task.status === 'SUCCESS')
+  if (existing && previousAttempt === undefined) {
+    await useTaskStore.getState().importCompletedTask(existing, job.attempt)
     return
   }
   {
@@ -43,7 +41,7 @@ const importJob = async (job: BatchJobSummary) => {
         response.message || 'Successful note result is not available yet'
       )
     const { markdown, transcript, audio_meta } = response.result
-    useTaskStore.getState().importCompletedTask({
+    await useTaskStore.getState().importCompletedTask({
       id: job.task_id,
       status: 'SUCCESS',
       createdAt: job.created_at,
@@ -81,10 +79,7 @@ const importJob = async (job: BatchJobSummary) => {
         grid_size: [],
         style: '',
       },
-    })
-    useBatchStore.setState(state => ({
-      importedTaskIds: { ...state.importedTaskIds, [job.task_id]: true },
-    }))
+    }, job.attempt)
   }
 }
 export const useBatchStore = create<BatchStore>((set, get) => ({
@@ -92,9 +87,13 @@ export const useBatchStore = create<BatchStore>((set, get) => ({
   list: null,
   connection: 'online',
   error: null,
-  importedTaskIds: {},
   detailRevisions: {},
   outcomeReceipts: null,
+  trackSubmittedBatch: batchId => {
+    set({ outcomeReceipts: trackSubmittedBatch(get().outcomeReceipts ?? readOutcomeReceipts(), batchId) })
+    // Revalidate a terminal discovery that raced the submit response.
+    get().invalidateDetail(batchId)
+  },
   notifyTerminalOutcome: detail => {
     const result = recordBatchOutcome(get().outcomeReceipts ?? readOutcomeReceipts(), detail)
     // Claim synchronously before emitting; StrictMode and other observers share it.
@@ -129,6 +128,7 @@ export const useBatchStore = create<BatchStore>((set, get) => ({
         }
       }
       if (failures.length) throw failures[0]
+      set({ outcomeReceipts: acknowledgeBatchImports(get().outcomeReceipts ?? readOutcomeReceipts(), detail.id) })
     })
     importQueue = next.catch(() => {})
     return next

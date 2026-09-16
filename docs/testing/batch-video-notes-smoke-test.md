@@ -107,6 +107,8 @@ for this follow-up. Real-video and desktop acceptance below remain NOT PERFORMED
 
 ## Second notification follow-up verification (starting HEAD `cea23e9`)
 
+Receipt retention and import deduplication details below are superseded by the third follow-up.
+
 The completion observer is now mounted in `App`, after backend initialization and
 above the router. It scans every summary page and observes running batches even
 on the batch list or note page. A mounted detail reader owns that batch; the
@@ -232,6 +234,74 @@ not changed in this task. Actual readiness must be established before live runs.
 
 The previously identified missing batch summary notification is addressed by the notification follow-up above. Its automated coverage is separate from the live UI acceptance procedures below.
 
+## Third notification follow-up verification (starting HEAD `759d076`)
+
+Successful imports now commit a task-ID/attempt acknowledgement in the same
+IndexedDB `task-storage` snapshot as the note. The highest imported attempt is
+retained independently of note contents; both individual history deletion and
+clearing history preserve it. Observer restart and detail reopening cannot restore
+that deleted attempt. A later successful attempt still imports new content once.
+Existing successful history is acknowledged without replacing its Markdown.
+Legacy history without acknowledgement metadata continues to hydrate normally.
+
+The batch receipt's `importPending` obligation is separate from those completed
+acknowledgements. Only after the history write resolves may the obligation clear;
+a rejected write leaves it eligible for retry. Note-history read failures still
+block imports. localStorage notification failures retain the existing in-memory
+fallback; durable notifications require available localStorage, while durable
+note acknowledgements use the same IndexedDB persistence as history.
+
+The 200-batch/30-day limits now apply only to historical terminal receipts.
+Nonterminal batches and terminal batches awaiting imports are neither count-capped
+nor age-expired. The eight-outcome limit remains per batch. Existing version-1
+tracked terminal receipts without `importPending` are conservatively checked for
+outstanding imports. Historical terminal discovery after upgrade stays silent.
+
+A successful submission response registers its returned batch ID before any
+navigation. Even if generation finishes before the first detail read, its final
+summary and successful notes are observed. If the response arrives after the user
+leaves, the confirmed server batch remains tracked but navigation stays on the
+user's chosen destination. An abandoned request without a confirmed server batch
+ID registers nothing. Registration also invalidates a terminal discovery that
+raced ahead of a delayed submit response.
+
+TDD evidence: before production changes, four observer regressions failed (remove
+and clear followed by restart, 205 active obligations across retention, terminal
+import failure across pruning) and three creation regressions failed (immediate
+success/failure summaries and tracking a late confirmed response). Their expected
+failures were unwanted history restoration or missing tracking/summary/import.
+The subsequent focused four-suite run passed 60 tests. Additional durable-write,
+new-attempt-content and delayed-submit-discovery checks passed in the final
+21-test import/observer run. These tests use real stores, hooks and toast state,
+with network and IndexedDB boundaries controlled by the test harness.
+
+Commands from `BillNote_frontend/`:
+
+```powershell
+npm test -- --run src/features/batch/useBatchObserver.test.tsx src/features/batch/BatchCreatePage.test.tsx src/features/batch/store.test.ts src/features/batch/useBatchNotifications.test.tsx
+npm test -- --run src/features/batch/store.test.ts src/features/batch/useBatchObserver.test.tsx
+npm test -- --run
+npx tsc -p tsconfig.batch.json --noEmit
+npx eslint src/features/batch/BatchCreatePage.tsx src/features/batch/BatchCreatePage.test.tsx src/features/batch/BatchDetailPage.test.tsx src/features/batch/outcomeReceipts.ts src/features/batch/store.ts src/features/batch/store.test.ts src/features/batch/useBatchNotifications.test.tsx src/features/batch/useBatchObserver.test.tsx src/features/batch/useBatchPolling.test.tsx src/store/taskStore/index.ts
+npm run build
+```
+
+| Third follow-up check | Observed result on 2026-09-16 | Exit |
+| --- | --- | --- |
+| Focused four-suite run | 60 passed, 12.73s (before three additional cases) | 0 |
+| Final import/observer suites | 21 passed, 4.81s | 0 |
+| Complete frontend suite | 110 passed across 11 suites, 18.17s | 0 |
+| Scoped TypeScript | No diagnostics | 0 |
+| Changed-file ESLint | No diagnostics | 0 |
+| Recovery integration | 1 passed in 15.75s | 0 |
+| Production frontend build | 17,802 modules; built in 1m 6s, existing warnings | 0 |
+| Working-tree whitespace check | No whitespace errors | 0 |
+
+Build warnings remain the existing Browserslist age, lottie-web eval and large
+chunks. Backend production code is unchanged. Full backend and full-repository lint were not
+rerun; prior baseline evidence remains historical. Live video generation and
+packaged Tauri restart acceptance remain NOT PERFORMED.
+
 ## Manual three-item workflow — NOT PERFORMED
 
 Prerequisites: a backend and UI built from this branch (one backend process), a
@@ -277,7 +347,10 @@ be verified; a subtitle-only run does not test the transcriber.
    multipart content rather than the first part or entire multipart video.
    Click **打开笔记** for each success; verify real Markdown, title, and source,
    plus transcript/screenshots if selected. Reopen the detail page and confirm
-   history imports do not duplicate either note.
+   history imports do not duplicate either note. Delete one imported note, restart
+   the app with the same profile, and confirm background discovery does not restore
+   it. Repeat with clearing history. A newly successful retry attempt should still
+   import its own result.
 7. In a disposable follow-up batch, verify **停止后续任务** lets the current item
    finish but starts no later item; **继续生成** resumes it. Verify
    **取消等待项** leaves the active item running and cancels only waiting items.

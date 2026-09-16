@@ -23,7 +23,7 @@ const tick = async (ms = 0) => {
 beforeEach(async () => {
   vi.useFakeTimers()
   await useTaskStore.persist.rehydrate()
-  useTaskStore.setState({ tasks: [], currentTaskId: null })
+  useTaskStore.setState({ tasks: [], currentTaskId: null, batchImportedAttempts: {} })
   useBatchStore.setState(useBatchStore.getInitialState(), true)
   getBatchMock.mockReset().mockResolvedValue(detailWithJob())
   vi.mocked(get_task_status).mockResolvedValue(successfulResult)
