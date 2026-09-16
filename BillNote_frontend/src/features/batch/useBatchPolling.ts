@@ -1,17 +1,17 @@
 import { useEffect } from 'react'
 import { isPollingNetworkError, pollingErrorMessage } from '@/utils/polling'
+import { inBatchPollingLane, registerDetailReader } from './pollingLane'
 import { getBatch } from './api'
 import { useBatchStore } from './store'
 import { isTerminalBatch } from './types'
 import type { BatchDetail } from './types'
 
-// Keep a single request/import lane across detail unmounts and remounts.
-let inFlight: Promise<void> | null = null
-
 export const useBatchPolling = (batchId: string | null | undefined, interval = 3000, refreshKey = 0) => {
   const detailRevision = useBatchStore(state => batchId ? (state.detailRevisions[batchId] ?? 0) : 0)
   useEffect(() => {
     if (!batchId) return
+    const unregister = registerDetailReader(batchId)
+    let polling = false
     let cancelled = false
     const isStale = () => cancelled ||
       (useBatchStore.getState().detailRevisions[batchId] ?? 0) !== detailRevision
@@ -23,9 +23,9 @@ export const useBatchPolling = (batchId: string | null | undefined, interval = 3
     let completed: BatchDetail | null = null
     const poll = async () => {
       // Keep a changing selection and React StrictMode from overlapping requests.
-      while (inFlight) await inFlight
-      if (isStale()) return
-      const run = async () => {
+      polling = true
+      await inBatchPollingLane(async () => {
+        if (isStale()) return
         let retry = false
         try {
           if (useBatchStore.getState().connection !== 'online')
@@ -55,11 +55,8 @@ export const useBatchPolling = (batchId: string | null | undefined, interval = 3
               Math.min(baseDelay * 2 ** Math.min(failures, 10), 30000)
             )
         }
-      }
-      const request = run()
-      inFlight = request
-      await request
-      if (inFlight === request) inFlight = null
+      })
+      polling = false
     }
     const unsubscribe = useBatchStore.subscribe((state, previous) => {
       if (
@@ -72,12 +69,13 @@ export const useBatchPolling = (batchId: string | null | undefined, interval = 3
         failures = 0
         clearTimeout(timer)
         // An active cycle will schedule the next poll after its import settles.
-        if (!inFlight) void poll()
+        if (!polling) void poll()
       }
     })
     void poll()
     return () => {
       cancelled = true
+      unregister()
       clearTimeout(timer)
       unsubscribe()
     }

@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import toast from 'react-hot-toast'
+import { readOutcomeReceipts, recordBatchOutcome } from './outcomeReceipts'
+import type { OutcomeReceipt } from './outcomeReceipts'
 import { batchLabels } from './presentation'
 import { ResultUnavailableError, TaskStorageError } from '@/utils/polling'
 import { get_task_status } from '@/services/note'
@@ -13,7 +15,7 @@ interface BatchStore {
   error: string | null
   importedTaskIds: Record<string, true>
   detailRevisions: Record<string, number>
-  notifiedTerminalOutcomes: Record<string, string[]>
+  outcomeReceipts: OutcomeReceipt[] | null
   notifyTerminalOutcome: (detail: BatchDetail) => void
   invalidateDetail: (batchId: string) => void
   setActive: (detail: BatchDetail | null) => void
@@ -92,24 +94,12 @@ export const useBatchStore = create<BatchStore>((set, get) => ({
   error: null,
   importedTaskIds: {},
   detailRevisions: {},
-  notifiedTerminalOutcomes: {},
+  outcomeReceipts: null,
   notifyTerminalOutcome: detail => {
-    if (detail.status !== 'COMPLETED' && detail.status !== 'PARTIAL') return
-    // Server revision and attempts identify the result even when a fast retry
-    // finishes between reads. Local refresh counters must not replay a toast.
-    const outcome = JSON.stringify([
-      detail.status, detail.updated_at,
-      [...detail.jobs].sort((a, b) => a.position - b.position)
-        .map(job => [job.task_id, job.attempt, job.status]),
-    ])
-    const notified = get().notifiedTerminalOutcomes[detail.id] ?? []
-    if (notified.includes(outcome)) return
-    // Claim synchronously before notifying so overlapping mounts cannot repeat it.
-    set(state => ({
-      notifiedTerminalOutcomes: {
-        ...state.notifiedTerminalOutcomes, [detail.id]: [...notified, outcome],
-      },
-    }))
+    const result = recordBatchOutcome(get().outcomeReceipts ?? readOutcomeReceipts(), detail)
+    // Claim synchronously before emitting; StrictMode and other observers share it.
+    set({ outcomeReceipts: result.receipts })
+    if (!result.notify) return
     const counts = detail.counts
     const message = `批次“${detail.name}”${batchLabels[detail.status]}：成功 ${counts.SUCCESS} / ${detail.total}，失败 ${counts.FAILED}，中断 ${counts.INTERRUPTED}，取消 ${counts.CANCELLED}`
     if (detail.status === 'COMPLETED') toast.success(message)

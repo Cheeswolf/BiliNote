@@ -1,5 +1,7 @@
-import { beforeEach, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { StrictMode } from 'react'
+import toast, { useToasterStore } from 'react-hot-toast'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { render, renderHook, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from './App'
 import { listBatches, getBatch } from './features/batch/api'
@@ -18,6 +20,9 @@ vi.mock('@/pages/NotFoundPage', () => ({ default: () => <p>未注册路由</p> }
 vi.mock('./features/batch/api', () => ({ listBatches: vi.fn(), getBatch: vi.fn() }))
 beforeEach(() => {
   vi.clearAllMocks()
+  localStorage.clear()
+  toast.remove()
+  vi.mocked(listBatches).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 })
   useBatchStore.setState(useBatchStore.getInitialState(), true)
   Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} })
   localStorage.setItem('bilinote-onboarded', '1')
@@ -47,3 +52,23 @@ it('preserves the web home index route', async () => {
   render(<App />)
   expect(await screen.findByText('单视频首页')).toBeTruthy()
 })
+
+afterEach(() => { vi.useRealTimers(); toast.remove() })
+
+it.each(['/batch', '/'])('announces completion on %s after leaving detail under StrictMode', async destination => {
+  const running = detailWithJob('SUMMARIZING')
+  const done = { ...detailWithJob('FAILED'), status: 'PARTIAL' as const }
+  vi.mocked(listBatches).mockResolvedValue({ items: [running], total: 1, page: 1, page_size: 100 })
+  vi.mocked(getBatch).mockResolvedValue(running)
+  window.history.replaceState({}, '', '/#/batch/batch-1')
+  const messages = renderHook(() => useToasterStore().toasts)
+  render(<StrictMode><App /></StrictMode>)
+  await screen.findByRole('heading', { name: 'Lecture notes' })
+  await userEvent.click(screen.getByRole('link', { name: destination === '/batch' ? '批量任务中心' : '单个视频' }))
+  if (destination === '/') await screen.findByText('单视频首页')
+  else await screen.findByRole('heading', { name: '批量任务中心' })
+  vi.mocked(listBatches).mockResolvedValue({ items: [done], total: 1, page: 1, page_size: 100 })
+  vi.mocked(getBatch).mockResolvedValue(done)
+  await vi.waitFor(() => expect(messages.result.current).toHaveLength(1), { timeout: 7000, interval: 100 })
+  expect(messages.result.current[0].message).toContain('部分异常')
+}, 12000)

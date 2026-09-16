@@ -1,6 +1,7 @@
 import './App.css'
 import { lazy, Suspense, useEffect } from 'react'
 import { BrowserRouter, HashRouter, Navigate, Routes, Route } from 'react-router-dom'
+import { useBatchObserver } from '@/features/batch/useBatchObserver'
 import { useTaskPolling } from '@/hooks/useTaskPolling.ts'
 import { useCheckBackend } from '@/hooks/useCheckBackend.ts'
 import { systemCheck } from '@/services/system.ts'
@@ -37,6 +38,8 @@ const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'))
 function App() {
   useTaskPolling(3000) // 每 3 秒轮询一次
   const { loading, initialized, failed, lastError, retry } = useCheckBackend()
+
+  useBatchObserver(initialized)
 
   // 在后端初始化完成后执行系统检查
   useEffect(() => {

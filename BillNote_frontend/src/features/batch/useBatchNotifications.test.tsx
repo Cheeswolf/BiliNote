@@ -29,9 +29,11 @@ const terminal = (status: 'COMPLETED' | 'PARTIAL' = 'COMPLETED'): BatchDetail =>
 beforeEach(async () => {
   vi.useFakeTimers()
   toast.remove()
+  localStorage.clear()
   await useTaskStore.persist.rehydrate()
   useTaskStore.setState({ tasks: [], currentTaskId: null })
   useBatchStore.setState(useBatchStore.getInitialState(), true)
+  useBatchStore.getState().notifyTerminalOutcome(detailWithJob())
   vi.mocked(getBatch).mockReset().mockResolvedValue(terminal())
   vi.mocked(get_task_status).mockReset().mockResolvedValue(successfulResult)
 })
@@ -79,14 +81,13 @@ it('dedupes terminal import retries, StrictMode, remount and unchanged cache rev
   expect(reopened.result.current).toHaveLength(1)
 })
 
-it.each(['attempt', 'server revision'] as const)('notifies a new terminal %s even when retry finishes between polls with the same counts', async change => {
+it('notifies a new terminal attempt even when retry finishes between polls with the same counts', async () => {
   vi.mocked(getBatch).mockResolvedValue(terminal('PARTIAL'))
   const { result } = observe()
   await tick()
   expect(result.current).toHaveLength(1)
   const retried = terminal('PARTIAL')
-  if (change === 'attempt') retried.jobs[0].attempt = 2
-  else retried.updated_at = '2026-09-10T10:02:00'
+  retried.jobs[0].attempt = 2
   // Attempts disambiguate even if the timestamp precision yields the same value.
   vi.mocked(getBatch).mockResolvedValue(retried)
   await act(async () => useBatchStore.getState().invalidateDetail('batch-1'))
@@ -117,6 +118,7 @@ it('tracks terminal outcomes independently across batches', async () => {
   await tick()
   first.unmount()
   vi.mocked(getBatch).mockResolvedValue({ ...terminal(), id: 'batch-2', name: '第二批' })
+  useBatchStore.getState().notifyTerminalOutcome(detailWithJob('SUMMARIZING', 'batch-2'))
   const second = observe('batch-2')
   await tick()
   expect(second.result.current).toHaveLength(2)
@@ -148,4 +150,133 @@ it('never notifies from a stale terminal read invalidated by a management action
   await tick(20)
   expect(result.current).toHaveLength(0)
   expect(useBatchStore.getState().active?.status).toBe('RUNNING')
+})
+
+it('ignores timestamp-only and job-order changes after a no-op management refresh', async () => {
+  const done = terminal('PARTIAL')
+  done.jobs.push({ ...done.jobs[0], task_id: 'task-2', position: 1 })
+  vi.mocked(getBatch).mockResolvedValue(done)
+  const { result } = observe()
+  await tick()
+  expect(result.current).toHaveLength(1)
+  vi.mocked(getBatch).mockResolvedValue({
+    ...done, updated_at: '2026-09-15T12:00:00',
+    jobs: [...done.jobs].reverse().map(job => ({ ...job, updated_at: 'later', position: 9 })),
+  })
+  await act(async () => useBatchStore.getState().invalidateDetail('batch-1'))
+  await tick()
+  expect(result.current).toHaveLength(1)
+})
+
+it('retains an outcome receipt after a complete store module reload', async () => {
+  const done = terminal('PARTIAL')
+  useBatchStore.getState().notifyTerminalOutcome(done)
+  const before = JSON.stringify(localStorage)
+  vi.resetModules()
+  const { useBatchStore: restarted } = await import('./store')
+  const messages = renderHook(() => useToasterStore().toasts)
+  await act(async () => restarted.getState().notifyTerminalOutcome(done))
+  expect(messages.result.current).toHaveLength(1)
+  expect(before).not.toBe('{}')
+})
+
+
+it('silently baselines first-discovered historical terminal batches', async () => {
+  localStorage.clear()
+  useBatchStore.setState(useBatchStore.getInitialState(), true)
+  const { result } = observe()
+  await tick(30)
+  expect(result.current).toHaveLength(0)
+  expect(useTaskStore.getState().tasks).toHaveLength(1)
+})
+
+it('does not lose progress or imports when notification storage throws', async () => {
+  const read = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('denied') })
+  const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+  try {
+    const { result } = observe()
+    await tick(30)
+    expect(result.current).toHaveLength(1)
+    expect(useBatchStore.getState().active?.status).toBe('COMPLETED')
+    expect(useTaskStore.getState().tasks).toHaveLength(1)
+    expect(useBatchStore.getState().error).toBeNull()
+  } finally { read.mockRestore(); write.mockRestore() }
+})
+
+it('keeps a persisted nonterminal observation eligible after a store restart', async () => {
+  useBatchStore.setState(useBatchStore.getInitialState(), true)
+  const { result } = observe()
+  await tick()
+  expect(result.current).toHaveLength(1)
+})
+
+it('recovers malformed storage and prunes old batches and old outcomes', async () => {
+  const key = 'bilinote-batch-outcomes'
+  localStorage.setItem(key, '{broken')
+  useBatchStore.setState(useBatchStore.getInitialState(), true)
+  const { result } = observe()
+  await tick()
+  expect(result.current).toHaveLength(0)
+  expect(JSON.parse(localStorage.getItem(key)!)).toMatchObject({ version: 1 })
+  const done = terminal('PARTIAL')
+  await act(async () => {
+    for (let index = 0; index < 210; index++)
+      useBatchStore.getState().notifyTerminalOutcome({ ...done, id: 'old-' + index })
+    for (let attempt = 1; attempt <= 12; attempt++)
+      useBatchStore.getState().notifyTerminalOutcome({ ...done, jobs: [{ ...done.jobs[0], attempt }] })
+  })
+  const saved = JSON.parse(localStorage.getItem(key)!)
+  expect(saved.receipts.length).toBeLessThanOrEqual(200)
+  expect(saved.receipts.some((entry: { batchId: string }) => entry.batchId === 'old-0')).toBe(false)
+  expect(saved.receipts.find((entry: { batchId: string }) => entry.batchId === 'batch-1').outcomes.length).toBeLessThanOrEqual(8)
+  useBatchStore.setState(useBatchStore.getInitialState(), true)
+  toast.remove()
+  await act(async () => useBatchStore.getState().notifyTerminalOutcome({ ...done, jobs: [{ ...done.jobs[0], attempt: 12 }] }))
+  expect(result.current).toHaveLength(0)
+})
+
+
+it('retains observed running batches while pruning a large historical backlog', async () => {
+  const { result } = renderHook(() => useToasterStore().toasts)
+  await act(async () => {
+    for (let index = 0; index < 210; index++)
+      useBatchStore.getState().notifyTerminalOutcome({ ...terminal('PARTIAL'), id: 'history-' + index })
+  })
+  useBatchStore.setState(useBatchStore.getInitialState(), true)
+  await act(async () => useBatchStore.getState().notifyTerminalOutcome(terminal()))
+  expect(result.current).toHaveLength(1)
+})
+
+it.each([
+  { version: 99, receipts: [] },
+  { version: 1, receipts: [null, { batchId: 'bad', outcomes: 4 }, { batchId: 'batch-1', outcomes: [null], touchedAt: 0 }] },
+  { version: 1, receipts: [{ batchId: 'batch-1', outcomes: [], touchedAt: Date.now() - 31 * 86400000 }] },
+])('recovers invalid or expired receipt records without historical notifications: %j', async saved => {
+  localStorage.setItem('bilinote-batch-outcomes', JSON.stringify(saved))
+  useBatchStore.setState(useBatchStore.getInitialState(), true)
+  const { result } = observe()
+  await tick()
+  expect(result.current).toHaveLength(0)
+  const repaired = JSON.parse(localStorage.getItem('bilinote-batch-outcomes')!)
+  expect(repaired.version).toBe(1)
+  expect(repaired.receipts).toHaveLength(1)
+})
+
+
+it('keeps a no-op management race silent after an already announced outcome', async () => {
+  const { result } = observe()
+  await tick()
+  expect(result.current).toHaveLength(1)
+  let resolve!: (detail: BatchDetail) => void
+  vi.mocked(getBatch).mockReturnValueOnce(new Promise(r => { resolve = r }))
+    .mockResolvedValue({ ...terminal(), updated_at: '2026-09-16T12:00:00' })
+  await act(async () => useBatchStore.getState().invalidateDetail('batch-1'))
+  await tick()
+  await act(async () => {
+    useBatchStore.getState().invalidateDetail('batch-1')
+    resolve({ ...terminal(), updated_at: '2026-09-16T11:59:59' })
+  })
+  await tick(20)
+  expect(result.current).toHaveLength(1)
+  expect(useBatchStore.getState().active?.updated_at).toBe('2026-09-16T12:00:00')
 })

@@ -1,6 +1,6 @@
 # Batch video notes: recovery and smoke-test evidence
 
-Date: 2026-09-15 (Asia/Shanghai). Branch: `feature/batch-video-notes`.
+Date: 2026-09-15; latest notification review update: 2026-09-16 (Asia/Shanghai). Branch: `feature/batch-video-notes`.
 Production-code baseline: `6cc6be320ff65b46630cf371453d976e5557e866`.
 The original Task 9 commit adds the integration test and this record. The notification follow-up below also changes frontend production code.
 
@@ -52,7 +52,10 @@ Existing build warnings concern old Browserslist data, lottie-web `eval`, and
 chunks over 500 kB. Tests also print an existing single-note retry fixture.
 No new lint diagnostic was introduced by Task 9.
 
-## Notification follow-up verification (starting HEAD `3f5b894`)
+## First notification follow-up verification (starting HEAD `3f5b894`)
+
+Historical implementation details below are superseded by the second follow-up.
+The recorded first-follow-up test results remain historical evidence.
 
 The missing final notification is now implemented. After a verified detail read
 returns `COMPLETED` or `PARTIAL`, polling sends one Chinese summary containing the
@@ -101,6 +104,69 @@ npm run build
 Backend production files are unchanged. The earlier full backend/lint results
 remain historical evidence; only recovery integration and scoped lint were rerun
 for this follow-up. Real-video and desktop acceptance below remain NOT PERFORMED.
+
+## Second notification follow-up verification (starting HEAD `cea23e9`)
+
+The completion observer is now mounted in `App`, after backend initialization and
+above the router. It scans every summary page and observes running batches even
+on the batch list or note page. A mounted detail reader owns that batch; the
+background observer skips it and takes over after unmount. Both use one serialized
+request/import lane, with revision checks before accepting detail responses.
+StrictMode cleanup leaves one active chain. Verified unchanged terminal summaries
+avoid repeated detail reads; failed imports retry and do not block other batches.
+List-page pagination and its visible progress refresh remain independent.
+
+Receipts use localStorage key `bilinote-batch-outcomes`, schema version 1, and
+survive store/module reloads and app restarts in the same browser profile. They
+retain at most 200 batches, eight outcomes per batch, and 30 days since observation.
+Pruning favors batches observed nonterminal over historical completions. Malformed
+JSON, unknown versions, invalid records and expired receipts recover safely.
+Read/write denial or quota failures retain in-memory deduplication and never stop
+progress or successful note imports; persistence cannot be guaranteed while
+storage is unavailable. Evicted or expired terminal batches are silently baselined.
+
+An outcome contains terminal status plus task IDs, attempts and statuses sorted by
+task ID. Timestamps and display order are excluded. Timestamp-only management
+updates and no-op races remain silent; changed attempts or statuses notify once,
+even when a fast retry finishes between polls. First-discovered historical terminal
+batches are baselined silently and background discovery does not import their old
+notes. Persisted nonterminal observations remain eligible for completion after
+reload. Directly opening historical detail still permits its normal note import.
+Summary messages remain Chinese, with no per-video success popups.
+
+TDD evidence: the two inherited interrupted regressions first failed for timestamp
+and module-reload duplicates. Added historical-baseline and malformed-storage
+regressions also failed before receipt changes. Both real app-route tests then
+failed with zero messages after navigating from detail to `/batch` or `/`, and
+passed after the observer was installed. Additional red tests exposed backlog
+eviction of an observed running batch and unwanted historical-note imports; both
+passed after targeted changes. One initial route-test text locator was corrected
+before the meaningful zero-toast failure was observed. No live media/model calls
+were made by these tests.
+
+Run from `BillNote_frontend/`:
+
+```powershell
+npm test -- --run src/features/batch/useBatchNotifications.test.tsx src/features/batch/useBatchObserver.test.tsx src/features/batch/useBatchPolling.test.tsx src/features/batch/store.test.ts src/App.batch.test.tsx
+npm test -- --run
+npx tsc -p tsconfig.batch.json --noEmit
+npx eslint src/App.tsx src/App.batch.test.tsx src/features/batch/api.ts src/features/batch/store.ts src/features/batch/outcomeReceipts.ts src/features/batch/pollingLane.ts src/features/batch/useBatchPolling.ts src/features/batch/useBatchObserver.ts src/features/batch/useBatchObserver.test.tsx src/features/batch/useBatchNotifications.test.tsx
+npm run build
+```
+
+| Second follow-up check | Observed result on 2026-09-16 | Exit |
+| --- | --- | --- |
+| Final receipt/observer focused suites | 26 passed across 2 suites in 4.38s | 0 |
+| Complete frontend suite | 100 passed across 11 suites | 0 |
+| Scoped TypeScript | No diagnostics | 0 |
+| Changed-file ESLint | No diagnostics | 0 |
+| Production frontend build | 17,802 modules; built in 1m 22s, existing warnings | 0 |
+| Recovery integration rerun | 1 passed in 31.17s | 0 |
+| Working-tree and staged whitespace checks | No whitespace errors | 0 |
+
+All backend production files remain unchanged. Full-backend and full-lint results
+above remain historical; recovery integration and changed-file lint were rerun.
+Real-video and packaged desktop acceptance remain **NOT PERFORMED**.
 
 ## Recovery test scope and observed trace
 
@@ -200,9 +266,12 @@ be verified; a subtitle-only run does not test the transcriber.
    third starts without a retry/resume click. Confirm two real successful notes,
    `PARTIAL`, success 2 / failure 1 / waiting 0 / interrupted 0, and ended 3 / 3.
    Check the specification's single final summary notification and absence of
-   per-item success toasts. Reopen the detail route within the same app session and
-   confirm no repeated summary. Retry failed items and confirm exactly one new
-   summary when that attempt ends. Record a missing or repeated notification as a failure.
+   per-item success toasts. Before the final item ends, navigate to the batch list
+   or note page and confirm the final summary still appears there. Reopen detail,
+   refresh the whole page, then restart the app against the same profile: the same
+   outcome must stay silent. A first visit to a historical completed batch after
+   upgrading must also stay silent. Retry failed items and confirm exactly one new
+   summary when that attempt ends. Record missing or repeated notifications as failures.
 6. Record relative result paths and hashes. Confirm distinct
    `data/tasks/<task_id>/` directories, matching result task IDs, and the intended
    multipart content rather than the first part or entire multipart video.
