@@ -54,10 +54,12 @@ export function readOutcomeReceipts(): OutcomeReceipt[] {
           !entry.outcomes.every((outcome: unknown) => typeof outcome === 'string')) continue
       receipts.push({ batchId: entry.batchId, touchedAt: entry.touchedAt,
         outcomes: [...new Set<string>(entry.outcomes)].slice(-MAX_OUTCOMES),
-        pending: entry.pending === true, tracked: entry.tracked === true,
-        // Older tracked terminal receipts may still owe an import; inspect once.
-        importPending: entry.importPending === true ||
-          (entry.importPending === undefined && entry.tracked === true && entry.pending !== true) })
+        pending: entry.pending === true,
+        // Legacy terminal receipts cannot distinguish an outstanding import from user deletion.
+        // Baseline them as handled; explicit detail opening or a new outcome can import again.
+        tracked: entry.tracked === true &&
+          (entry.pending === true || typeof entry.importPending === 'boolean'),
+        importPending: entry.importPending === true })
     }
     return prune(receipts)
   } catch { return [] }

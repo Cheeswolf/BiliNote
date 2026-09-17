@@ -204,3 +204,32 @@ it('revisits silent terminal discovery when a delayed submit confirms that the b
   await tick(30)
   expect(global.result.current).toHaveLength(1)
 })
+
+it('preserves cleared legacy history and silently baselines a terminal receipt without import metadata', async () => {
+  const { set } = await import('idb-keyval')
+  await set('task-storage', JSON.stringify({ version: 0, state: { tasks: [], currentTaskId: null } }))
+  await useTaskStore.persist.rehydrate()
+  localStorage.setItem('bilinote-batch-outcomes', JSON.stringify({ version: 1, receipts: [{
+    batchId: 'batch-1', touchedAt: Date.now(), pending: false, tracked: true,
+    outcomes: ['["COMPLETED",[["task-1",1,"SUCCESS"]]]'],
+  }] }))
+  let completed: BatchDetail = { ...detailWithJob('SUCCESS'), status: 'COMPLETED' }
+  vi.mocked(listBatches).mockImplementation(async () => list([completed]))
+  vi.mocked(getBatch).mockImplementation(async () => completed)
+  const first = observe()
+  await tick()
+  expect(useTaskStore.getState().tasks).toEqual([])
+  expect(first.result.current).toHaveLength(0)
+  expect(get_task_status).not.toHaveBeenCalled()
+  first.unmount()
+  useBatchStore.setState(useBatchStore.getInitialState(), true)
+  const restarted = observe()
+  await tick()
+  expect(useTaskStore.getState().tasks).toEqual([])
+  expect(restarted.result.current).toHaveLength(0)
+  completed = { ...completed, updated_at: 'later', jobs: [{ ...completed.jobs[0], attempt: 2 }] }
+  await tick(10)
+  expect(useTaskStore.getState().tasks).toHaveLength(1)
+  expect(useTaskStore.getState().batchImportedAttempts).toEqual({ 'task-1': 2 })
+  expect(restarted.result.current).toHaveLength(1)
+})

@@ -262,3 +262,59 @@ it('imports the content of a new successful attempt once even when the previous 
   expect(useTaskStore.getState().tasks[0].markdown).toMatchObject([{ content: '# New attempt' }])
   expect(getResult).toHaveBeenCalledTimes(2)
 })
+
+it('refreshes legacy successful content before durably acknowledging the current attempt', async () => {
+  await setItem('task-storage', JSON.stringify({ version: 0, state: {
+    tasks: [{ id: 'task-1', status: 'SUCCESS', markdown: '# Old attempt', createdAt: '2025-01-01' }],
+    currentTaskId: 'task-1',
+  } }))
+  await useTaskStore.persist.rehydrate()
+  getResult.mockResolvedValue(successfulResult)
+  const detail = { ...detailWithJob('SUCCESS'), status: 'COMPLETED' as const }
+  detail.jobs[0].attempt = 2
+  await useBatchStore.getState().importSuccessfulTasks(detail)
+  await useTaskStore.persist.rehydrate()
+  expect(useTaskStore.getState().tasks).toMatchObject([{
+    id: 'task-1', markdown: [{ content: '# Imported lecture' }], createdAt: '2025-01-01',
+  }])
+  expect(useTaskStore.getState().batchImportedAttempts).toEqual({ 'task-1': 2 })
+  expect(useTaskStore.getState().currentTaskId).toBe('task-1')
+  await useBatchStore.getState().importSuccessfulTasks(detail)
+  expect(getResult).toHaveBeenCalledTimes(1)
+})
+
+it('keeps valid hydrated acknowledgements while discarding malformed entries that would suppress imports', async () => {
+  await setItem('task-storage', JSON.stringify({ version: 0, state: {
+    tasks: [], currentTaskId: null,
+    batchImportedAttempts: {
+      valid: 2, zero: 0, maximum: Number.MAX_SAFE_INTEGER,
+      'task-1': '99', boolean: true, negative: -1, fraction: 1.5,
+      unsafe: Number.MAX_SAFE_INTEGER + 1, infinite: 'OVERFLOW', missing: null,
+      '': 1, ' ': 1, 'bad/id': 1, ['a'.repeat(257)]: 1,
+    },
+  } }).replace('"OVERFLOW"', '1e400'))
+  await useTaskStore.persist.rehydrate()
+  getResult.mockResolvedValue(successfulResult)
+  const detail = detailWithJob('SUCCESS')
+  detail.jobs.push({ ...detail.jobs[0], task_id: 'valid', attempt: 2 })
+  await useBatchStore.getState().importSuccessfulTasks(detail)
+  expect(useTaskStore.getState().tasks.map(task => task.id)).toEqual(['task-1'])
+  expect(useTaskStore.getState().batchImportedAttempts).toEqual({
+    valid: 2, zero: 0, maximum: Number.MAX_SAFE_INTEGER, 'task-1': 1,
+  })
+  expect(getResult).toHaveBeenCalledTimes(1)
+})
+
+it.each(['99', [99], 99, true, null])('discards malformed acknowledgement containers: %j', async value => {
+  await setItem('task-storage', JSON.stringify({ version: 0, state: {
+    tasks: [], currentTaskId: null, batchImportedAttempts: value,
+  } }))
+  await useTaskStore.persist.rehydrate()
+  expect(useTaskStore.getState().batchImportedAttempts).toEqual({})
+  getResult.mockResolvedValue({ ...successfulResult, task_id: '0' })
+  const detail = detailWithJob('SUCCESS')
+  detail.jobs[0].task_id = '0'
+  await useBatchStore.getState().importSuccessfulTasks(detail)
+  expect(useTaskStore.getState().tasks.map(task => task.id)).toEqual(['0'])
+  expect(useTaskStore.getState().batchImportedAttempts).toEqual({ '0': 1 })
+})

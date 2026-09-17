@@ -1,6 +1,6 @@
 # Batch video notes: recovery and smoke-test evidence
 
-Date: 2026-09-15; latest notification review update: 2026-09-16 (Asia/Shanghai). Branch: `feature/batch-video-notes`.
+Date: 2026-09-15; latest migration review update: 2026-09-17 (Asia/Shanghai). Branch: `feature/batch-video-notes`.
 Production-code baseline: `6cc6be320ff65b46630cf371453d976e5557e866`.
 The original Task 9 commit adds the integration test and this record. The notification follow-up below also changes frontend production code.
 
@@ -241,8 +241,8 @@ IndexedDB `task-storage` snapshot as the note. The highest imported attempt is
 retained independently of note contents; both individual history deletion and
 clearing history preserve it. Observer restart and detail reopening cannot restore
 that deleted attempt. A later successful attempt still imports new content once.
-Existing successful history is acknowledged without replacing its Markdown.
-Legacy history without acknowledgement metadata continues to hydrate normally.
+The legacy-note and receipt migration behavior from this follow-up is superseded
+by the fourth follow-up below. Current-schema acknowledged history remains untouched.
 
 The batch receipt's `importPending` obligation is separate from those completed
 acknowledgements. Only after the history write resolves may the obligation clear;
@@ -253,9 +253,8 @@ note acknowledgements use the same IndexedDB persistence as history.
 
 The 200-batch/30-day limits now apply only to historical terminal receipts.
 Nonterminal batches and terminal batches awaiting imports are neither count-capped
-nor age-expired. The eight-outcome limit remains per batch. Existing version-1
-tracked terminal receipts without `importPending` are conservatively checked for
-outstanding imports. Historical terminal discovery after upgrade stays silent.
+nor age-expired. The eight-outcome limit remains per batch. The original handling of version-1 tracked terminal receipts without
+`importPending` is superseded by the deletion-preserving migration below. Historical terminal discovery after upgrade stays silent.
 
 A successful submission response registers its returned batch ID before any
 navigation. Even if generation finishes before the first detail read, its final
@@ -301,6 +300,67 @@ Build warnings remain the existing Browserslist age, lottie-web eval and large
 chunks. Backend production code is unchanged. Full backend and full-repository lint were not
 rerun; prior baseline evidence remains historical. Live video generation and
 packaged Tauri restart acceptance remain NOT PERFORMED.
+
+## Fourth notification follow-up: migration safety (starting HEAD `922de9d`)
+
+Verified on 2026-09-17. A legacy successful note without an imported-attempt
+acknowledgement is no longer treated as proof that the current backend attempt
+was imported. An eligible import retrieves the current result and replaces the
+old note contents, preserving its creation time and selection, then persists the
+note and current attempt acknowledgement in one snapshot. Already acknowledged
+current-schema notes remain untouched; a later successful attempt refreshes once.
+
+Legacy terminal receipts without durable `importPending` metadata migrate to
+untracked, handled history while retaining their observed outcome fingerprints.
+Background discovery stays silent and does not restore notes deleted or cleared
+before upgrade. A changed attempt can subsequently notify and import normally.
+The old schema cannot distinguish user deletion from an unfinished import. This
+migration deliberately respects deletion: an old outstanding import may require
+opening its batch detail or retrying manually. Explicitly recorded current-schema
+pending imports and legacy nonterminal observations retain their recovery behavior.
+
+Hydration accepts imported-attempt acknowledgements only from plain objects.
+Task IDs must contain 1–256 ASCII letters, digits, underscores or hyphens, starting
+with a letter or digit; attempts must be numeric nonnegative safe integers
+(0 through `Number.MAX_SAFE_INTEGER`). Invalid containers become empty maps;
+invalid entries are dropped individually while valid acknowledgements survive.
+
+TDD evidence: the first store/observer run failed seven expected assertions:
+legacy Markdown stayed stale, a numeric-string acknowledgement suppressed import,
+four malformed containers survived hydration, and cleared legacy history was
+restored. After the fixes the focused store, observer and notification suites
+passed 49 tests. The mixed-entry fixture also covers numeric overflow (`1e400`),
+unsafe integers, fractions, negatives, booleans, null, and invalid task IDs. The
+legacy receipt case checks a second restart, no accidental notifications, and a
+later successful attempt; existing tests cover durable-write failure/retry and
+current-schema acknowledgement preservation.
+
+Commands from `BillNote_frontend/`:
+
+```powershell
+npm test -- --run src/features/batch/store.test.ts src/features/batch/useBatchObserver.test.tsx src/features/batch/useBatchNotifications.test.tsx
+npm test -- --run
+npx tsc -p tsconfig.batch.json --noEmit
+npx eslint src/features/batch/outcomeReceipts.ts src/features/batch/store.ts src/features/batch/store.test.ts src/features/batch/useBatchObserver.test.tsx src/store/taskStore/index.ts
+npm run build
+```
+
+Recovery used the same existing Python environment and command recorded above.
+
+| Fourth follow-up check | Observed result on 2026-09-17 | Exit |
+| --- | --- | --- |
+| Focused migration/notification suites | 49 passed, 4.35s | 0 |
+| Complete frontend suite | 118 passed across 11 suites, 16.86s | 0 |
+| Scoped TypeScript | No diagnostics | 0 |
+| Changed-file ESLint | No diagnostics | 0 |
+| Recovery integration | 1 passed in 27.84s | 0 |
+| Production frontend build | 17,802 modules; built in 1m 9s, existing warnings | 0 |
+| Working-tree whitespace check | No whitespace errors | 0 |
+
+Existing Browserslist age, lottie-web eval and large-chunk build warnings remain.
+No backend source changed. Full backend and full-repository lint were not rerun;
+previous evidence remains historical. Live three-video generation and packaged
+Tauri restart acceptance remain NOT PERFORMED.
 
 ## Manual three-item workflow — NOT PERFORMED
 

@@ -94,6 +94,15 @@ interface TaskStore {
   retryTask: (id: string, payload?: Task['formData']) => Promise<void>
 }
 
+// Persistence is untrusted. Invalid entries must not hide successful results.
+const hydrateBatchImportedAttempts = (value: unknown): Record<string, number> => {
+  if (value === null || typeof value !== 'object' ||
+      (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) return {}
+  return Object.fromEntries(Object.entries(value).filter(([taskId, attempt]) =>
+    /^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/.test(taskId) &&
+    typeof attempt === 'number' && Number.isSafeInteger(attempt) && attempt >= 0))
+}
+
 type PersistedTaskState = Pick<TaskStore, 'tasks' | 'currentTaskId' | 'batchImportedAttempts'>
 const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', PersistedTaskState]]> = (
   setTransient,
@@ -133,11 +142,9 @@ const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', Persiste
             await set(state => {
               const existing = state.tasks.find(t => t.id === task.id)
               return {
-                tasks: existing?.status === 'SUCCESS' && previousAttempt === undefined
-                  ? state.tasks
-                  : existing
-                    ? state.tasks.map(t => t.id === task.id ? { ...task, createdAt: t.createdAt } : t)
-                    : [task, ...state.tasks],
+                tasks: existing
+                  ? state.tasks.map(t => t.id === task.id ? { ...task, createdAt: t.createdAt } : t)
+                  : [task, ...state.tasks],
                 batchImportedAttempts: { ...state.batchImportedAttempts, [task.id]: batchAttempt },
               }
             })
@@ -327,14 +334,14 @@ const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', Persiste
             : null,
         })
       },
-      // Preserve the existing version/key and all old note shapes; only normalize the typo.
+      // Preserve the existing version/key and note shapes; validate import metadata on hydration.
       merge: (persisted, current) => {
         const saved = persisted as Partial<TaskStore> | undefined
         return {
           ...current,
           ...saved,
           connections: {},
-          batchImportedAttempts: saved?.batchImportedAttempts ?? {},
+          batchImportedAttempts: hydrateBatchImportedAttempts(saved?.batchImportedAttempts),
           tasks: (saved?.tasks ?? current.tasks).map(task => ({
             ...task,
             status: (task.status as string) === 'FAILD' ? 'FAILED' : task.status,

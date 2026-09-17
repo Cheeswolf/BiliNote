@@ -29,11 +29,7 @@ const importJob = async (job: BatchJobSummary) => {
   await ensureTaskHistoryHydrated()
   const previousAttempt = useTaskStore.getState().batchImportedAttempts[job.task_id]
   if (previousAttempt >= job.attempt) return
-  const existing = useTaskStore.getState().tasks.find(task => task.id === job.task_id && task.status === 'SUCCESS')
-  if (existing && previousAttempt === undefined) {
-    await useTaskStore.getState().importCompletedTask(existing, job.attempt)
-    return
-  }
+  // A legacy note has no attempt provenance: retrieve the current result before acknowledging it.
   {
     const response = await get_task_status(job.task_id, { suppressToast: true })
     if (response.status !== 'SUCCESS' || !response.result)
