@@ -628,14 +628,20 @@ provider-call counts are **not available**. A matching branch desktop artifact
 was not built or launched. Live generation prerequisites were verified by the
 source run above; packaged lifecycle acceptance remains pending.
 
-## Full lint baseline
+## Historical Task 9 full lint baseline
 
-The following diagnostics are on files byte-unchanged from `6cc6be3` (each checked
-with `git diff --quiet 6cc6be3 -- <file>`, exit 0). The fresh ESLint JSON's file,
-message, location, severity, and counts exactly match the preceding Task 9 JSON.
-All paths below are relative to `BillNote_frontend/`. To reproduce exact diagnostic
-messages/locations, run the recorded lint command on that baseline with the same
-installed dependencies. This is an explicit baseline exception, not a clean lint.
+This table is historical Task 9 evidence, captured for files byte-unchanged from
+`6cc6be3` (each checked with `git diff --quiet 6cc6be3 -- <file>`, exit 0). The
+fresh ESLint JSON's file, message, location, severity, and counts exactly matched
+the preceding Task 9 JSON. All paths below are relative to `BillNote_frontend/`.
+To reproduce exact diagnostic messages/locations, run the recorded lint command on
+that baseline with the same installed dependencies.
+
+The historical `MarkdownViewer.tsx` entry records 24 errors and two warnings; it
+does not describe the later source. The [fifth follow-up comparison](#fifth-notification-follow-up-preserve-markdown-history)
+is the authoritative update for that file: its 24 errors are unchanged, warnings
+reduced from 2 to 1, and no diagnostics were added. This remains an explicit
+baseline exception; no full lint rerun or clean lint pass is claimed.
 
 | File | Errors | Warnings |
 | --- | ---: | ---: |
