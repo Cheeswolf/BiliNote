@@ -1,15 +1,19 @@
 # Batch video notes: recovery and smoke-test evidence
 
-Date: 2026-09-15; latest migration review update: 2026-09-17 (Asia/Shanghai). Branch: `feature/batch-video-notes`.
+Date: 2026-09-15; latest live source acceptance update: 2026-09-17 (Asia/Shanghai). Branch: `feature/batch-video-notes`.
 Production-code baseline: `6cc6be320ff65b46630cf371453d976e5557e866`.
 The original Task 9 commit adds the integration test and this record. The notification follow-up below also changes frontend production code.
 
 ## Acceptance status
 
-Automated recovery and regression checks passed. Live three-video generation and
-Tauri exit/reopen acceptance were **not performed**. These remain open acceptance
-items; the automated fixture is not evidence of working downloads, transcription,
-provider credentials, rendered real notes, or packaged desktop lifecycle behavior.
+Automated recovery and regression checks passed. The 2026-09-17 live source
+API/UI run below verified ordered three-item execution, failure continuation,
+real transcription/model generation, rendered notes, and interrupted-backend
+recovery without rerunning prior successes. Supplemental notification and reload
+observations are recorded with their limits. A fully UI-driven creation workflow
+and packaged Tauri exit/reopen acceptance remain open; source-process evidence
+does not establish packaged desktop lifecycle behavior. Earlier dated sections
+retain their historical test results and pre-live-run acceptance status.
 
 ## Reproducible automated checks
 
@@ -417,7 +421,120 @@ Notification API warning in jsdom. No backend source changed. Full backend and
 full-repository lint were not rerun; previous evidence remains historical. Live
 three-video generation and packaged Tauri restart acceptance remain NOT PERFORMED.
 
-## Manual three-item workflow — NOT PERFORMED
+## Live source acceptance — 2026-09-17
+
+Source commit: `0dabf8d54f7465e117c57672445bae27e104a353`.
+This run used an isolated disposable copy of the source backend and Vite UI;
+325 tracked backend/frontend files were byte-equal to that commit. It did not
+build or run a packaged Tauri application. Provider alias/model: `qwen` /
+`qwen3-vl-flash`; transcriber: local `fast-whisper`, `tiny`; FFmpeg available.
+Real downloads, transcription, model generation, persistence, and Markdown
+rendering were exercised, with no mocked APIs. Preview, ordered selection,
+submission and process interruption/resume were driven through the source API
+harness; the source UI supplied note rendering and supplemental notification
+observations. This is not evidence that every creation-wizard step was clicked.
+
+Local evidence root (uncommitted):
+`E:\biliNote\batch-acceptance\20260917-live-source`.
+Safe summaries are `three-item-result.json`, `recovery-result.json`,
+`transition-audit.json`, `events.jsonl`, `verification.json`,
+`final-verification.json`, `source-copy-verification.json`,
+`ui-observations.json`, `cleanup-verification.json`, and
+`sanitized-lifecycle.log`. Raw private logs, provider
+configuration, and the disposable database are not publication artifacts and
+were not staged. An exact-value scan of the exported summaries and documentation
+found no configured provider credential or private provider endpoint.
+
+### Ordered three-item batch
+
+Batch `d41dbfcb-92b0-44f6-9aaa-1e5d80694027` (`Live source three-item acceptance`)
+finished `PARTIAL` in **179.547 seconds**: success 2, failed 1, pending 0,
+interrupted 0. The original execution claimed the jobs in this order:
+
+| Position | Task ID | Source | Initial outcome |
+| --- | --- | --- | --- |
+| 0 | `bccce761-d71d-44e1-a677-f5079c0fa458` | `BV1Xt411275k?p=2` | `SUCCESS`, attempt 0 |
+| 1 | `80ef2092-294f-4db9-80af-a5434182624c` | `BV0000000000?p=1` | `FAILED`, HTTP 404, attempt 0 |
+| 2 | `9548d74f-1b49-4edd-8e76-103caab02534` | `BV1piKH6SEG2?p=1` | `SUCCESS`, attempt 0 |
+
+The inaccessible fixture was accepted by the real preview API as syntactically
+valid, then failed during execution. The third item started automatically after
+that failure. A disposable SQLite transition-audit trigger recorded **42 status
+transitions**, including recovery and supplemental retries; maximum active jobs
+was **1** across parsing, downloading, transcribing, summarizing and saving.
+The successful jobs each passed through transcription and summarization.
+
+Both successful notes were opened and rendered in the Vite UI. Their results
+live under separate `backend/data/tasks/<task_id>/<task_id>.json` paths. The
+multipart result identifies `BV1Xt411275k_p2`, with 392.166 seconds of media;
+the ordinary result identifies `BV1piKH6SEG2_p1`, with 169.393 seconds. Preview
+metadata supplied the parent title and zero duration for multipart rows, so
+part-specific preview title/duration quality remains a limitation; the selected
+`p=2` URL and actual result establish which part ran.
+
+| Successful task | SHA-256 of result JSON |
+| --- | --- |
+| `bccce761-d71d-44e1-a677-f5079c0fa458` | `fdd52660ca14fa89d625ef1df33039c75b47921e1bb7fa09b2e8e0b60b36fa80` |
+| `9548d74f-1b49-4edd-8e76-103caab02534` | `2e9a1aa22857434d76b6f36cff0c774a5d3ad73659fb936f007a44b5a85ae2e2` |
+
+Supplemental failed-item retries reached attempt 2 and remained `FAILED`.
+The two successful jobs retained attempt 0 and their original result hashes.
+
+### Process interruption and manual recovery
+
+Batch `9e7f743a-65e9-4808-a1f5-a7dd9e832810` (`Live source process recovery`)
+finished `COMPLETED`, success **2 / 2**, in **168.031 seconds** including the
+interruption, restart, 12-second idle observation and explicit resume.
+
+| Task ID | Before process termination | After backend restart | Final outcome |
+| --- | --- | --- | --- |
+| `7c55d693-f17f-4ed8-b236-c22323ef3677` | `SUCCESS`, attempt 0 | `SUCCESS`, attempt 0 | `SUCCESS`, attempt 0 |
+| `110c755c-4338-447e-ac5c-5945f947ab18` | `PARSING`, attempt 0 | `INTERRUPTED`, attempt 0 | `SUCCESS`, attempt 1 |
+
+Restart exposed `RECOVERABLE`. The next **12 seconds recorded zero status
+transitions** before the explicit resume request. The second item restarted at
+parsing and then downloaded, transcribed, summarized and saved. It did not resume
+mid-stage. Terminal completion was recorded at `2026-09-17T08:05:56.646576Z`
+(16:05:56 Asia/Shanghai). The first success retained its full job metadata,
+attempt and result hash; the audit contains only one parsing claim for that task.
+Thus this run did not rerun the prior success.
+
+Recovery result hashes:
+
+| Task ID | SHA-256 |
+| --- | --- |
+| `7c55d693-f17f-4ed8-b236-c22323ef3677` | `321a6395efd46979d030ecbf2701d6401e206a33f4829408f7a1b8d6e2b1c75b` |
+| `110c755c-4338-447e-ac5c-5945f947ab18` | `a43961f27e3cb7e59a7952f5b0ff0e63b752b81b8d78512a783f983173231f14` |
+
+### Notification observations and remaining scope
+
+The original three-item terminal notification was **not captured**, so its
+exactly-once behavior is not claimed. Recorded live accessibility observations
+in `ui-observations.json` provide supplemental evidence:
+
+- Recovery summary appeared at `08:06:46.488Z` and disappeared at `08:06:49.432Z`;
+  one appearance was observed in a 22-second window, reporting success 2 / 2.
+- Failed retry attempt 2 produced one summary in an 18-second window on `/batch`,
+  appearing at `08:08:22.595Z` and disappearing at `08:08:27.612Z`; it reported
+  success 2 / 3 and failure 1, demonstrating notification outside batch detail.
+- A full-page reload at `08:08:48.343Z` was followed for 12 seconds; no summary
+  appeared for those unchanged outcomes.
+
+These finite observation windows support once-only behavior for the recorded
+outcomes; they do not prove every notification scenario. Per-item toast absence,
+browser/profile restart, delete/clear-history behavior, stop/cancel controls,
+and a completely UI-driven creation flow were not separately observed live here.
+Existing automated tests cover their documented cases independently.
+
+Fresh evidence verification re-read the disposable database, audited claim order,
+matched all four successful result hashes, confirmed no retry of the prior
+success, and compared all 325 copied source files. Cleanup verification found no
+remaining test-owned backend/Vite processes or listeners. Packaged Tauri normal
+exit/reopen, sidecar termination, native notification behavior and matching
+desktop artifact acceptance remain **NOT PERFORMED**. The process crash test
+above is source-backend recovery evidence, not a desktop lifecycle pass.
+
+## Manual three-item workflow — source API/UI coverage above; full UI checklist pending
 
 Prerequisites: a backend and UI built from this branch (one backend process), a
 working configured provider, a ready transcriber, FFmpeg, and controlled video
@@ -472,8 +589,10 @@ be verified; a subtitle-only run does not test the transcriber.
    Use **重试失败项** on a controlled failure and confirm successful IDs/results
    remain unchanged. Record these supplemental checks separately.
 
-Real-run evidence: batch/task IDs, stage timestamps, note hashes, and screenshots
-are **not available**, because this workflow was not executed.
+Live source batch/task IDs, stage timestamps, note hashes and accessibility
+observations are available in the dated section above. That partial API/UI run
+does not complete every step of this manual UI checklist; screenshots were not
+captured.
 
 ## Manual Tauri restart — NOT PERFORMED
 
@@ -504,10 +623,10 @@ are **not available**, because this workflow was not executed.
    untouched and finish `PARTIAL`; **重试失败项** is the distinct retry action.
    Open the resulting notes and verify final counts and once-only summary behavior.
 
-Desktop-run evidence: exit/reopen logs, screenshots, task IDs, and provider-call
-counts are **not available**. Missing branch desktop artifacts/toolchain and
-unverified live generation prerequisites are the reasons, not a passed acceptance
-result.
+Desktop-run evidence: packaged exit/reopen logs, screenshots, task IDs and
+provider-call counts are **not available**. A matching branch desktop artifact
+was not built or launched. Live generation prerequisites were verified by the
+source run above; packaged lifecycle acceptance remains pending.
 
 ## Full lint baseline
 
