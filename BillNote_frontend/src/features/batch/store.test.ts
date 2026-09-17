@@ -1,7 +1,7 @@
 import { createJSONStorage } from 'zustand/middleware'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { set as setItem } from 'idb-keyval'
-import { useTaskStore } from '@/store/taskStore'
+import { useTaskStore, type Task } from '@/store/taskStore'
 import { get_task_status } from '@/services/note'
 import { useBatchStore } from './store'
 import { detailWithJob, successfulResult } from './testFixtures'
@@ -34,6 +34,7 @@ describe('batch imports', () => {
       audioMeta: { title: 'Result title', duration: 42 },
       formData: { video_url: 'https://www.youtube.com/watch?v=abc' },
     })
+    expect(useTaskStore.getState().tasks[0].currentMarkdownVersionId).toBe('task-1-batch')
     expect(useTaskStore.getState().currentTaskId).toBe('selected-note')
     expect(getResult).toHaveBeenCalledTimes(1)
   })
@@ -206,7 +207,12 @@ it('retrieves results with peak concurrency one across concurrent batches, conti
 
 it('waits for durable note and acknowledgement storage, and retains the import obligation after a failed write', async () => {
   const originalStorage = useTaskStore.persist.getOptions().storage
-  let persisted: string | null = null
+  const legacyVersion = { ver_id: 'task-1-batch', content: '# Local edit before failure', style: 'edited', model_name: 'old', created_at: '2025-01-01' }
+  let persisted = JSON.stringify({ version: 0, state: {
+    tasks: [{ id: 'task-1', status: 'SUCCESS', markdown: [legacyVersion], createdAt: '2025-01-01' }],
+    currentTaskId: 'task-1',
+  } })
+  const oldSnapshot = persisted
   let rejectWrite!: (error: Error) => void
   let writing = false
   let fail = true
@@ -222,6 +228,7 @@ it('waits for durable note and acknowledgement storage, and retains the import o
     },
   })) })
   try {
+    await useTaskStore.persist.rehydrate()
     getResult.mockResolvedValue(successfulResult)
     useBatchStore.getState().notifyTerminalOutcome(detailWithJob())
     const completed = { ...detailWithJob('SUCCESS'), status: 'COMPLETED' as const }
@@ -236,13 +243,19 @@ it('waits for durable note and acknowledgement storage, and retains the import o
     expect(await outcome).toMatchObject({ message: expect.stringContaining('disk unavailable') })
     expect(useTaskStore.getState().batchImportedAttempts['task-1']).toBeUndefined()
     expect(useBatchStore.getState().outcomeReceipts?.[0].importPending).toBe(true)
-    expect(persisted).toBeNull()
+    expect(persisted).toBe(oldSnapshot)
+    expect(useTaskStore.getState().tasks[0].markdown).toContainEqual(legacyVersion)
     fail = false
     await useBatchStore.getState().importSuccessfulTasks(completed)
     expect(JSON.parse(persisted!).state).toMatchObject({
       tasks: [{ id: 'task-1', status: 'SUCCESS' }], batchImportedAttempts: { 'task-1': 1 },
     })
     expect(useBatchStore.getState().outcomeReceipts?.[0].importPending).toBe(false)
+    await useTaskStore.persist.rehydrate()
+    const history = useTaskStore.getState().tasks[0].markdown
+    expect(history).toHaveLength(2)
+    expect(history).toContainEqual(legacyVersion)
+    expect(useTaskStore.getState().batchImportedAttempts).toEqual({ 'task-1': 1 })
   } finally {
     useTaskStore.persist.setOptions({ storage: originalStorage })
     await useTaskStore.persist.rehydrate()
@@ -259,7 +272,13 @@ it('imports the content of a new successful attempt once even when the previous 
   await useTaskStore.persist.rehydrate()
   useBatchStore.setState(useBatchStore.getInitialState(), true)
   await useBatchStore.getState().importSuccessfulTasks(retried)
-  expect(useTaskStore.getState().tasks[0].markdown).toMatchObject([{ content: '# New attempt' }])
+  expect(useTaskStore.getState().tasks[0].markdown).toMatchObject([
+    { content: '# New attempt' }, { content: '# Imported lecture' },
+  ])
+  const versions = useTaskStore.getState().tasks[0].markdown
+  expect(Array.isArray(versions) && new Set(versions.map(version => version.ver_id)).size).toBe(2)
+  if (!Array.isArray(versions)) throw new Error('Expected version history')
+  expect(useTaskStore.getState().tasks[0].currentMarkdownVersionId).toBe(versions[0].ver_id)
   expect(getResult).toHaveBeenCalledTimes(2)
 })
 
@@ -275,7 +294,7 @@ it('refreshes legacy successful content before durably acknowledging the current
   await useBatchStore.getState().importSuccessfulTasks(detail)
   await useTaskStore.persist.rehydrate()
   expect(useTaskStore.getState().tasks).toMatchObject([{
-    id: 'task-1', markdown: [{ content: '# Imported lecture' }], createdAt: '2025-01-01',
+    id: 'task-1', markdown: [{ content: '# Imported lecture' }, { content: '# Old attempt' }], createdAt: '2025-01-01',
   }])
   expect(useTaskStore.getState().batchImportedAttempts).toEqual({ 'task-1': 2 })
   expect(useTaskStore.getState().currentTaskId).toBe('task-1')
@@ -317,4 +336,94 @@ it.each(['99', [99], 99, true, null])('discards malformed acknowledgement contai
   await useBatchStore.getState().importSuccessfulTasks(detail)
   expect(useTaskStore.getState().tasks.map(task => task.id)).toEqual(['0'])
   expect(useTaskStore.getState().batchImportedAttempts).toEqual({ '0': 1 })
+})
+
+
+it.each(['# Imported lecture', '# Earlier draft', '# My local edit'])(
+  'preserves edited legacy history and settings when refreshing with %s across restart', async content => {
+    const versions = [
+      { ver_id: 'task-1-batch', content: '# My local edit', style: 'edited', model_name: 'local', created_at: '2025-02-03' },
+      { ver_id: 'draft-1', content: '# Earlier draft', style: 'outline', model_name: 'old-model', created_at: '2025-02-02' },
+      { ver_id: 'draft-0', content: '# First draft', style: 'detailed', model_name: 'first-model', created_at: '2025-02-01' },
+    ]
+    const formData = {
+      video_url: 'https://youtu.be/abc', platform: 'youtube', quality: 'high',
+      model_name: 'chosen-model', provider_id: 'chosen-provider', style: 'outline',
+      format: ['summary'], grid_size: [2, 2], extras: 'Keep my instructions', screenshot: true,
+    }
+    const legacy: Task = {
+      id: 'task-1', status: 'SUCCESS', markdown: versions, createdAt: '2025-01-01',
+      audioMeta: { ...successfulResult.result.audio_meta, title: 'Old title' },
+      transcript: { ...successfulResult.result.transcript, full_text: 'Old transcript' }, formData,
+    }
+    await setItem('task-storage', JSON.stringify({ version: 0, state: {
+      tasks: [legacy], currentTaskId: 'task-1',
+    } }))
+    await useTaskStore.persist.rehydrate()
+    getResult.mockResolvedValue({ ...successfulResult, result: { ...successfulResult.result, markdown: content } })
+    const detail = detailWithJob('SUCCESS')
+    await useBatchStore.getState().importSuccessfulTasks(detail)
+    const refreshed = useTaskStore.getState().tasks[0]
+    expect(refreshed).toMatchObject({
+      createdAt: '2025-01-01', audioMeta: { title: 'Result title' },
+      transcript: { full_text: 'Lecture text' },
+      formData: { ...formData, video_url: 'https://www.youtube.com/watch?v=abc' },
+    })
+    const history = refreshed.markdown
+    expect(Array.isArray(history)).toBe(true)
+    if (!Array.isArray(history)) throw new Error('Expected version history')
+    expect(history[0].content).toBe(content)
+    expect(refreshed.currentMarkdownVersionId).toBe(history[0].ver_id)
+    for (const version of versions) expect(history).toContainEqual(version)
+    expect(history).toHaveLength(content === '# Imported lecture' ? 4 : 3)
+    expect(new Set(history.map(version => version.ver_id)).size).toBe(history.length)
+    // Reload the durable snapshot and reset observer memory, as on restart.
+    await useTaskStore.persist.rehydrate()
+    useBatchStore.setState(useBatchStore.getInitialState(), true)
+    await useBatchStore.getState().importSuccessfulTasks(detail)
+    expect(useTaskStore.getState().tasks).toEqual([refreshed])
+    expect(useTaskStore.getState().currentTaskId).toBe('task-1')
+    expect(useTaskStore.getState().batchImportedAttempts).toEqual({ 'task-1': 1 })
+    expect(getResult).toHaveBeenCalledTimes(1)
+  }
+)
+
+
+it('merges server version arrays without duplicating matching content or reusing occupied IDs', async () => {
+  const local = [
+    { ver_id: 'shared', content: '# Edited', style: 'local', model_name: 'local-model', created_at: '2025-01-02' },
+    { ver_id: 'original', content: '# Original', style: 'old', model_name: 'old-model', created_at: '2025-01-01' },
+  ]
+  await setItem('task-storage', JSON.stringify({ version: 0, state: {
+    tasks: [{ id: 'task-1', markdown: local, status: 'SUCCESS', createdAt: '2025-01-01' }],
+  } }))
+  await useTaskStore.persist.rehydrate()
+  getResult.mockResolvedValue({ ...successfulResult, result: {
+    ...successfulResult.result, markdown: [
+      { ...local[0], content: '# Server current' },
+      { ...local[1], ver_id: 'shared' },
+      { ...local[0], ver_id: 'repeat', content: '# Server current' },
+    ],
+  } })
+  await useBatchStore.getState().importSuccessfulTasks(detailWithJob('SUCCESS'))
+  await useTaskStore.persist.rehydrate()
+  const history = useTaskStore.getState().tasks[0].markdown
+  if (!Array.isArray(history)) throw new Error('Expected version history')
+  expect(history.map(version => version.content)).toEqual(['# Server current', '# Original', '# Edited'])
+  expect(history).toContainEqual(local[0])
+  expect(history).toContainEqual(local[1])
+  expect(new Set(history.map(version => version.ver_id)).size).toBe(3)
+})
+
+
+it('makes a subsequent local edit current after importing a server version', async () => {
+  getResult.mockResolvedValue(successfulResult)
+  await useBatchStore.getState().importSuccessfulTasks(detailWithJob('SUCCESS'))
+  useTaskStore.getState().updateTaskContent('task-1', { markdown: '# My later edit' })
+  await useTaskStore.persist.rehydrate()
+  const task = useTaskStore.getState().tasks[0]
+  const versions = task.markdown
+  if (!Array.isArray(versions)) throw new Error('Expected version history')
+  expect(versions.map(version => version.content)).toEqual(['# My later edit', '# Imported lecture'])
+  expect(task.currentMarkdownVersionId).toBe(versions[0].ver_id)
 })

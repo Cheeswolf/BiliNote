@@ -54,6 +54,8 @@ export interface Markdown {
 export interface Task {
   id: string
   markdown: string | Markdown[] //为了兼容之前的笔记
+  // Optional for legacy history; explicitly selects imports and subsequent edits.
+  currentMarkdownVersionId?: string
   transcript: Transcript
   status: TaskStatus
   audioMeta: AudioMeta
@@ -103,6 +105,55 @@ const hydrateBatchImportedAttempts = (value: unknown): Record<string, number> =>
     typeof attempt === 'number' && Number.isSafeInteger(attempt) && attempt >= 0))
 }
 
+// Keep historical objects intact, promote matching content, and allocate fresh
+// IDs for colliding results. Selection is explicit, independent of timestamps.
+const mergeImportedTask = (existing: Task | undefined, incoming: Task): Task => {
+  const versions = (task: Task): Markdown[] => typeof task.markdown === 'string'
+    ? task.markdown ? [{
+        ver_id: `${task.id}-legacy`, content: task.markdown,
+        style: task.formData?.style || '', model_name: task.formData?.model_name || '',
+        created_at: task.createdAt,
+      }] : []
+    : task.markdown
+  const previous = existing ? versions(existing) : []
+  const occupiedIds = new Set(previous.map(version => version.ver_id))
+  const uniqueVersion = (version: Markdown): Markdown => {
+    let id = version.ver_id
+    let suffix = 1
+    while (occupiedIds.has(id)) id = `${version.ver_id}-${suffix++}`
+    occupiedIds.add(id)
+    return id === version.ver_id ? version : { ...version, ver_id: id }
+  }
+  const imported: Markdown[] = []
+  const importedContents = new Set<string>()
+  const promoted = new Set<Markdown>()
+  for (const version of versions(incoming)) {
+    if (importedContents.has(version.content)) continue
+    importedContents.add(version.content)
+    const matching = previous.find(old => old.content === version.content)
+    if (matching) {
+      imported.push(matching)
+      promoted.add(matching)
+    } else {
+      imported.push(uniqueVersion(version))
+    }
+  }
+  return {
+    ...existing,
+    ...incoming,
+    createdAt: existing?.createdAt ?? incoming.createdAt,
+    currentMarkdownVersionId: imported[0]?.ver_id,
+    markdown: [...imported, ...previous.filter(version => !promoted.has(version))],
+    // Batch summaries supply the canonical source, but omit generation settings.
+    formData: {
+      ...incoming.formData,
+      ...existing?.formData,
+      video_url: incoming.formData.video_url,
+      platform: incoming.formData.platform,
+    },
+  }
+}
+
 type PersistedTaskState = Pick<TaskStore, 'tasks' | 'currentTaskId' | 'batchImportedAttempts'>
 const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', PersistedTaskState]]> = (
   setTransient,
@@ -143,8 +194,8 @@ const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', Persiste
               const existing = state.tasks.find(t => t.id === task.id)
               return {
                 tasks: existing
-                  ? state.tasks.map(t => t.id === task.id ? { ...task, createdAt: t.createdAt } : t)
-                  : [task, ...state.tasks],
+                  ? state.tasks.map(t => t.id === task.id ? mergeImportedTask(t, task) : t)
+                  : [mergeImportedTask(undefined, task), ...state.tasks],
                 batchImportedAttempts: { ...state.batchImportedAttempts, [task.id]: batchAttempt },
               }
             })
@@ -242,6 +293,7 @@ const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', Persiste
                   ...task,
                   ...data,
                   markdown: updatedMarkdown,
+                  currentMarkdownVersionId: newVersion.ver_id,
                 }
               }
 

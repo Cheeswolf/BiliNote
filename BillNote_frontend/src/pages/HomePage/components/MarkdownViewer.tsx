@@ -339,14 +339,16 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   useEffect(() => {
     if (!currentTask) return
 
-    if (!isMultiVersion) {
+    if (typeof currentTask.markdown === 'string') {
       setCurrentVerId('') // 清空旧版本 ID
       setModelName(currentTask.formData.model_name)
-      setStyle(currentTask.formData.style)
+      setStyle(currentTask.formData.style || '')
       setCreateTime(currentTask.createdAt)
       setSelectedContent(currentTask?.markdown)
     } else {
-      const latestVersion = [...currentTask.markdown].sort(
+      const latestVersion = currentTask.markdown.find(
+        version => version.ver_id === currentTask.currentMarkdownVersionId
+      ) ?? [...currentTask.markdown].sort(
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
       )[0]
 
@@ -354,7 +356,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         setCurrentVerId(latestVersion.ver_id)
       }
     }
-  }, [currentTask?.id, taskStatus])
+  }, [currentTask])
   useEffect(() => {
     if (!currentTask || !isMultiVersion) return
 

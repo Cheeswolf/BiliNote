@@ -362,6 +362,61 @@ No backend source changed. Full backend and full-repository lint were not rerun;
 previous evidence remains historical. Live three-video generation and packaged
 Tauri restart acceptance remain NOT PERFORMED.
 
+## Fifth notification follow-up: preserve Markdown history (starting HEAD `f8e8901`)
+
+Verified on 2026-09-17. Refreshing an eligible legacy or retried successful result
+now merges Markdown into the existing note. It retains local edits and every
+previous version object, the original creation time, selected note, and saved
+generation settings. Matching content reuses its existing version; incoming
+repeated content is deduplicated and colliding version IDs receive unused suffixes.
+Server metadata and the canonical source URL/platform are refreshed.
+
+The note stores `currentMarkdownVersionId` in the same durable snapshot as its
+versions and imported-attempt acknowledgement. Imported content is selected even
+when a preserved local version has a later timestamp. A subsequent local edit
+becomes current. The mounted viewer reacts to refreshed content; reload preserves
+selection. Legacy notes without the field keep timestamp-based selection. A failed
+storage write retains old versions and the outstanding import obligation, and its
+retry commits without duplicating history. This supersedes the fourth follow-up's
+replacement of old note contents; its receipt/deletion migration is unchanged.
+
+The initial implementation run recorded seven store regression failures and two
+viewer failures before their fixes; its focused four-suite run passed 57 tests.
+The resumed verification inspected all four source/test changes and ran:
+
+```powershell
+npm test -- --run
+npx tsc -p tsconfig.batch.json --noEmit
+npx eslint src/features/batch/store.test.ts src/store/taskStore/index.ts src/pages/HomePage/components/MarkdownViewer.test.tsx
+npm run build
+```
+
+Recovery used the same existing Python environment and command recorded above.
+
+| Fifth follow-up check | Observed result on 2026-09-17 | Exit |
+| --- | --- | --- |
+| Complete frontend suite | 126 passed across 12 suites, 25.49s | 0 |
+| Scoped TypeScript (`tsconfig.batch.json`) | No diagnostics | 0 |
+| Changed store/test ESLint | No diagnostics | 0 |
+| Viewer ESLint baseline comparison | 24 unchanged errors; warnings reduced from 2 to 1; no added diagnostics | 0 (comparison) |
+| Recovery integration | 1 passed in 15.77s | 0 |
+| Production frontend build | 17,802 modules; built in 1m 14s, existing warnings | 0 |
+| Working-tree whitespace check | No whitespace errors | 0 |
+
+The viewer comparison used ESLint `lintText` with the same file path/configuration
+for `git show f8e8901:BillNote_frontend/src/pages/HomePage/components/MarkdownViewer.tsx`
+and the working source. Diagnostic rule, severity, message, columns and exact
+source spans matched as a multiset after accounting for shifted line numbers.
+Only the first effect's missing-dependencies warning disappeared. Viewer lint is
+still an explicit baseline exception, not clean lint. The scoped TypeScript config
+does not include the viewer; no full-app TypeScript pass is claimed.
+
+Existing Browserslist age, lottie-web eval and large-chunk build warnings remain.
+Tests also print the existing retry fixture and the viewer dependency's unsupported
+Notification API warning in jsdom. No backend source changed. Full backend and
+full-repository lint were not rerun; previous evidence remains historical. Live
+three-video generation and packaged Tauri restart acceptance remain NOT PERFORMED.
+
 ## Manual three-item workflow — NOT PERFORMED
 
 Prerequisites: a backend and UI built from this branch (one backend process), a
