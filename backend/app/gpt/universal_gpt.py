@@ -96,11 +96,19 @@ class UniversalGPT(GPT):
         }]
 
     def _checkpoint_path(self, checkpoint_key: str) -> Path:
-        safe_key = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in checkpoint_key)
+        safe_key = hashlib.sha256(checkpoint_key.encode('utf-8')).hexdigest()
         return self.checkpoint_dir / f"{safe_key}.gpt.checkpoint.json"
 
     def _build_source_signature(self, source: GPTSource) -> str:
         payload = {
+            "generation_signature": getattr(self, 'generation_signature', None),
+            "provider_id": getattr(self, 'provider_id', None),
+            "base_url": str(getattr(self.client, 'base_url', '')),
+            "link": source.link,
+            "screenshot": source.screenshot,
+            "rendered_prompt": self.create_messages(source.segment, title=source.title,
+                tags=source.tags, _format=source._format, style=source.style, extras=source.extras),
+            "merge_prompt": MERGE_PROMPT,
             "model": self.model,
             "temperature": self.temperature,
             "max_request_bytes": self.max_request_bytes,
@@ -128,7 +136,13 @@ class UniversalGPT(GPT):
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            if data.get("source_signature") != source_signature:
+            checksum = data.pop('sha256', None)
+            if (data.get('version') != 2 or data.get("source_signature") != source_signature
+                    or checksum != hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
+                    or data.get('phase') not in ('summarize', 'merge', 'complete')
+                    or not isinstance(data.get('partials'), list)
+                    or not all(isinstance(part, str) and part.strip() for part in data['partials'])
+                    or (data['phase'] == 'complete' and len(data['partials']) != 1)):
                 path.unlink(missing_ok=True)
                 return None
             return data
@@ -139,15 +153,22 @@ class UniversalGPT(GPT):
     def _save_checkpoint(self, checkpoint_key: str, source_signature: str, partials: list, phase: str) -> None:
         path = self._checkpoint_path(checkpoint_key)
         data = {
-            "version": 1,
+            "version": 2,
             "source_signature": source_signature,
             "phase": phase,
             "partials": partials,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+        data['sha256'] = hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
         tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_path.replace(path)
+        try:
+            with tmp_path.open('w', encoding='utf-8') as stream:
+                json.dump(data, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp_path, path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     def _clear_checkpoint(self, checkpoint_key: str) -> None:
         self._checkpoint_path(checkpoint_key).unlink(missing_ok=True)
@@ -241,6 +262,8 @@ class UniversalGPT(GPT):
         )
 
         current_partials = list(partials)
+        if checkpoint_key and source_signature:
+            self._save_checkpoint(checkpoint_key, source_signature, current_partials, "merge")
         while len(current_partials) > 1:
             groups = merge_chunker.group_texts_by_budget(current_partials, build_messages)
             new_partials = []
@@ -249,8 +272,8 @@ class UniversalGPT(GPT):
                 try:
                     response = self._chat_completion_create(messages)
                 except Exception as exc:
-                    if checkpoint_key and source_signature:
-                        self._save_checkpoint(checkpoint_key, source_signature, current_partials, "merge")
+                    # The previous successful group already saved the resumable
+                    # frontier. Never overwrite it with pre-merge partials.
                     raise
 
                 new_partials.append(response.choices[0].message.content.strip())
@@ -272,6 +295,13 @@ class UniversalGPT(GPT):
         source.segment = self.ensure_segments_type(source.segment)
         checkpoint_key = source.checkpoint_key
         source_signature = self._build_source_signature(source) if checkpoint_key else None
+        checkpoint = self._load_checkpoint(checkpoint_key, source_signature) if checkpoint_key else None
+        if checkpoint and checkpoint['phase'] == 'complete':
+            return checkpoint['partials'][0]
+        if checkpoint and checkpoint['phase'] == 'merge':
+            merged = self._merge_partials(checkpoint['partials'], checkpoint_key, source_signature)
+            self._save_checkpoint(checkpoint_key, source_signature, [merged], 'complete')
+            return merged
 
         def message_builder(segments, image_urls, **kwargs):
             return self.create_messages(segments, video_img_urls=image_urls, **kwargs)
@@ -301,7 +331,6 @@ class UniversalGPT(GPT):
 
         partials = []
         if checkpoint_key and source_signature:
-            checkpoint = self._load_checkpoint(checkpoint_key, source_signature)
             if checkpoint and isinstance(checkpoint.get("partials"), list):
                 partials = checkpoint["partials"]
 
@@ -331,9 +360,9 @@ class UniversalGPT(GPT):
 
         if len(partials) == 1:
             if checkpoint_key:
-                self._clear_checkpoint(checkpoint_key)
+                self._save_checkpoint(checkpoint_key, source_signature, partials, 'complete')
             return partials[0]
         merged = self._merge_partials(partials, checkpoint_key, source_signature)
         if checkpoint_key:
-            self._clear_checkpoint(checkpoint_key)
+            self._save_checkpoint(checkpoint_key, source_signature, [merged], 'complete')
         return merged

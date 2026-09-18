@@ -2,6 +2,8 @@ import importlib
 import sys
 import threading
 import time
+import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from app.db.engine import Base
 from app.db.models.note_batches import NoteBatch
 from app.db.models.note_jobs import NoteJob
 from app.db.note_queue_dao import create_batch
+from app.models.transcriber_model import TranscriptResult
 
 
 def load_queue_module():
@@ -233,3 +236,105 @@ def test_context_preparation_failure_is_terminal(sessions):
     assert job_states(sessions, ids)[0][0] == "FAILED"
     assert job_states(sessions, ids)[0][1]
     assert seen == []
+
+
+@pytest.mark.parametrize('operation', ['start', 'recover_interrupted_jobs', 'run_once'])
+def test_second_process_cannot_recover_or_claim_live_owner_jobs(sessions, tmp_path, operation):
+    queue_module = load_queue_module()
+    entered, release = threading.Event(), threading.Event()
+    def runner(context):
+        entered.set()
+        assert release.wait(45)
+    owner = queue_module.NoteQueueService(sessions, runner)
+    owner.start()
+    _, ids = add_batch(sessions, statuses=('PENDING', 'PENDING'))
+    owner.wake()
+    assert entered.wait(3)
+    script = '''
+import sys
+from pathlib import Path
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from app.services.note_queue import NoteQueueService
+engine = create_engine('sqlite:///' + sys.argv[1])
+queue = NoteQueueService(sessionmaker(bind=engine), lambda context: Path(sys.argv[3]).touch())
+try:
+    getattr(queue, sys.argv[2])()
+except RuntimeError as error:
+    assert 'already' in str(error)
+    sys.exit(23)
+finally:
+    queue.stop()
+'''
+    try:
+        elsewhere = tmp_path / 'other-working-directory'
+        elsewhere.mkdir()
+        child = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'queue.db'),
+            operation, str(tmp_path / 'wrong-runner')], cwd=elsewhere,
+            env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1])),
+            capture_output=True, text=True, timeout=35,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        assert child.returncode == 23, child.stdout + child.stderr
+        assert job_states(sessions, ids) == [('PARSING', None), ('PENDING', None)]
+        assert not (tmp_path / 'wrong-runner').exists()
+    finally:
+        # Stop waits for the current job; stop before releasing it so the second
+        # pending item cannot be claimed by the owner during test cleanup.
+        stopper = threading.Thread(target=owner.stop)
+        stopper.start()
+        release.set()
+        stopper.join(5)
+        owner.stop()
+
+
+def test_startup_repairs_signed_final_before_interrupting_batch(sessions, tmp_path, monkeypatch):
+    from dataclasses import asdict
+    from app.services.note_artifacts import generation_signature, save_signed
+    from app.services.task_workspace import TaskWorkspace
+    from app.models.notes_model import NoteResult
+    from app.models.audio_model import AudioDownloadResult
+    from app.routers import note as router
+    queue_module = load_queue_module()
+    batch_id, ids = add_batch(sessions, statuses=('SAVING',), batch_status='RUNNING')
+    workspace = TaskWorkspace.for_task(ids[0])
+    settings = {'model_name': 'demo', 'video_url': 'https://example.com/0',
+                'platform': 'example', 'task_id': ids[0]}
+    final = NoteResult('# Paid result', TranscriptResult('en', 'text', []),
+        AudioDownloadResult('', 'Title', 1, None, 'example', '0', {}))
+    save_signed(workspace.result, asdict(final), generation_signature(settings))
+    monkeypatch.setattr(router, 'NOTE_OUTPUT_DIR', str(tmp_path / 'legacy'))
+    seen = []
+    queue_module.NoteQueueService(sessions, seen.append).recover_interrupted_jobs()
+    assert job_states(sessions, ids) == [('SUCCESS', None)]
+    assert (tmp_path / 'legacy' / f'{ids[0]}.json').is_file()
+    with sessions() as session:
+        assert session.get(NoteBatch, batch_id).status == 'COMPLETED'
+        assert session.get(NoteJob, ids[0]).result_path == str(workspace.result)
+    assert seen == []
+
+
+def test_failed_startup_releases_scheduler_ownership(sessions, monkeypatch):
+    queue_module = load_queue_module()
+    first = queue_module.NoteQueueService(sessions, lambda context: None)
+    monkeypatch.setattr(first, 'recover_interrupted_jobs',
+        lambda: (_ for _ in ()).throw(RuntimeError('recovery storage failed')))
+    with pytest.raises(RuntimeError, match='recovery storage failed'):
+        first.start()
+    assert first._ownership.stream is None
+    second = queue_module.NoteQueueService(sessions, lambda context: None)
+    try:
+        second.start()
+        assert second._ownership.stream is not None
+    finally:
+        second.stop()
+    assert second._ownership.stream is None
+
+
+def test_remote_database_is_rejected_before_recovery_or_claim():
+    from types import SimpleNamespace
+    from contextlib import nullcontext
+    from sqlalchemy.engine import make_url
+    queue_module = load_queue_module()
+    session = SimpleNamespace(get_bind=lambda: SimpleNamespace(url=make_url('postgresql://localhost/notes')))
+    with pytest.raises(RuntimeError, match='local SQLite'):
+        queue_module.NoteQueueService(lambda: nullcontext(session), lambda context: None)

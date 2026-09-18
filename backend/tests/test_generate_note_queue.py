@@ -30,6 +30,16 @@ def payload(**changes):
                 model_name='demo', provider_id='provider', **changes)
 
 
+@pytest.mark.parametrize('path', ['watch?v=dQw4w9WgXcQ', 'shorts/dQw4w9WgXcQ'])
+def test_mobile_youtube_preview_url_is_accepted_by_execution(path):
+    from app.services.batch_preview import normalize_video_url
+    item = normalize_video_url('https://m.youtube.com/' + path)
+    assert item.valid
+    request = note.VideoRequest(video_url=item.normalized_url, platform='youtube',
+                               quality='medium', model_name='demo', provider_id='provider')
+    assert request.video_url.startswith('https://www.youtube.com/')
+
+
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -75,10 +85,10 @@ def test_generate_note_enqueues_single_job_without_background_tasks(api):
 def test_prefetched_transcript_is_ready_before_job_is_claimable(api, monkeypatch):
     monkeypatch.setattr(TranscriberConfigManager, 'is_model_ready', lambda self: pytest.fail('must skip readiness'))
     original_persist = note._persist_prefetched_transcript
-    def persist(task_id, transcript, workspace=None):
+    def persist(task_id, transcript, workspace=None, settings=None):
         with api.sessions() as session:
             assert session.get(NoteJob, task_id) is None
-        original_persist(task_id, transcript, workspace)
+        original_persist(task_id, transcript, workspace, settings)
     monkeypatch.setattr(note, '_persist_prefetched_transcript', persist)
     def wake():
         with api.sessions() as session:
@@ -157,6 +167,36 @@ def test_legacy_retry_task_id_creates_standalone_job(api):
     assert response.json()['data']['task_id'] == 'legacy-task'
     with api.sessions() as session:
         assert session.get(NoteJob, 'legacy-task') is not None
+
+
+@pytest.mark.parametrize('batch_source', [False, True])
+def test_regeneration_creates_idempotent_new_job_without_changing_source(api, batch_source):
+    source_id = api.client.post('/api/generate_note', json=payload()).json()['data']['task_id']
+    with api.sessions() as session:
+        source = session.get(NoteJob, source_id)
+        source.status = 'SUCCESS'
+        session.commit()
+    if batch_source:
+        with api.sessions() as session:
+            batch = create_batch(session, 'clone-source', 'source', 'links', {}, [{
+                'original_url': 'local.mp4', 'normalized_url': 'local.mp4',
+                'platform': 'local', 'resource_key': 'local:source'}])
+            source_id = batch.jobs[0].task_id
+            batch.jobs[0].status = 'SUCCESS'
+            session.commit()
+    submission = payload(task_id='new-version', create_only=True, parent_task_id=source_id)
+    assert api.client.post('/api/generate_note', json=submission).status_code == 200
+    assert api.client.post('/api/generate_note', json=submission).status_code == 200
+    with api.sessions() as session:
+        source = session.get(NoteJob, source_id)
+        clone = session.get(NoteJob, 'new-version')
+        assert source.status == 'SUCCESS'
+        assert bool(source.batch_id) == batch_source
+        assert clone.batch_id is None
+        assert clone.attempt == 0
+        assert json.loads(clone.settings_json)['parent_task_id'] == source_id
+    changed = api.client.post('/api/generate_note', json={**submission, 'style': 'different'})
+    assert changed.status_code == 409
 
 
 @pytest.mark.parametrize('status', ['PENDING', 'TRANSCRIBING', 'FAILED', 'INTERRUPTED', 'CANCELLED'])

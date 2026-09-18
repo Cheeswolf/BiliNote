@@ -18,6 +18,7 @@ from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
 from app.services.note import NoteGenerator, logger
 from app.services.task_workspace import TaskWorkspace
+from app.services.note_artifacts import generation_signature, load_note_result, save_signed
 from app.models.notes_model import NoteResult
 from app.services.task_serial_executor import task_serial_executor
 from app.utils.response import ResponseWrapper as R
@@ -47,6 +48,9 @@ class VideoRequest(BaseModel):
     model_name: str
     provider_id: str
     task_id: Optional[str] = None
+    # Fresh identities support safe regeneration; exact replays do not reset work.
+    create_only: bool = False
+    parent_task_id: Optional[str] = None
     format: Optional[list] = []
     style: Optional[str] = None
     extras: Optional[str]=None
@@ -95,7 +99,8 @@ def save_note_to_file(task_id: str, note: NoteResult) -> Path:
     return atomic_save_note(task_id, note, Path(NOTE_OUTPUT_DIR) / f"{task_id}.json")
 
 
-def _persist_prefetched_transcript(task_id: str, transcript: dict, workspace: Optional[TaskWorkspace] = None) -> None:
+def _persist_prefetched_transcript(task_id: str, transcript: dict, workspace: Optional[TaskWorkspace] = None,
+                                   settings: Optional[dict] = None) -> None:
     """把客户端预取的字幕写到 NoteGenerator 期望的转写缓存文件里。
 
     NoteGenerator.generate 会优先读 <task_id>_transcript.json，命中即跳过 download_subtitles
@@ -124,8 +129,11 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict, workspace: Op
 
     target = workspace.transcript if workspace else Path(NOTE_OUTPUT_DIR) / f"{task_id}_transcript.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    with open(target, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    if settings is not None:
+        save_signed(target, payload, generation_signature({**settings, 'task_id': task_id}))
+    else:
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
     logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
 
 
@@ -142,6 +150,7 @@ def execute_note_job(
     task_id = request.task_id
     if not task_id:
         raise ValueError("task_id is required")
+    TaskWorkspace.for_task(task_id)
     if workspace is not None and workspace.task_id != task_id:
         raise ValueError("workspace does not belong to task_id")
     failed_reported = False
@@ -157,9 +166,12 @@ def execute_note_job(
         generator = NoteGenerator()
         if not request.model_name or not request.provider_id:
             raise HTTPException(status_code=400, detail="请选择模型和提供者")
+        signature = generation_signature(request.model_dump(mode='json'))
         if request.prefetched_transcript:
-            _persist_prefetched_transcript(task_id, request.prefetched_transcript, workspace)
-        note = generator.generate(
+            _persist_prefetched_transcript(task_id, request.prefetched_transcript, workspace,
+                                          request.model_dump(mode='json'))
+        note = load_note_result(workspace, signature) if workspace is not None else None
+        note = note or generator.generate(
             video_url=request.video_url, platform=request.platform, quality=request.quality,
             task_id=task_id, model_name=request.model_name, provider_id=request.provider_id,
             link=request.link, _format=request.format, style=request.style, extras=request.extras,
@@ -171,7 +183,8 @@ def execute_note_job(
             raise RuntimeError("Note generation returned no markdown")
         generator._report(task_id, TaskStatus.SAVING, callback=report)
         if workspace is not None:
-            result_path = atomic_save_note(task_id, note, workspace.result)
+            save_signed(workspace.result, asdict(note), signature)
+            result_path = workspace.result
             save_note_to_file(task_id, note)
         else:
             result_path = save_note_to_file(task_id, note)
@@ -269,11 +282,11 @@ def generate_note(data: VideoRequest, request: Request, session=Depends(get_db))
 
         task_id = data.task_id or str(uuid.uuid4())
         workspace = TaskWorkspace.for_task(task_id)
-        settings = data.model_dump(mode="json", exclude={"task_id", "prefetched_transcript"})
+        settings = data.model_dump(mode="json", exclude={"task_id", "prefetched_transcript", "create_only"})
         prepare = None
         if data.prefetched_transcript:
-            prepare = lambda: _persist_prefetched_transcript(task_id, data.prefetched_transcript, workspace)
-        enqueue_single_job(session, task_id, settings, prepare=prepare)
+            prepare = lambda: _persist_prefetched_transcript(task_id, data.prefetched_transcript, workspace, settings)
+        enqueue_single_job(session, task_id, settings, prepare=prepare, create_only=data.create_only)
         request.app.state.note_queue.wake()
         return R.success({"task_id": task_id})
     except JobRetryConflict as exc:

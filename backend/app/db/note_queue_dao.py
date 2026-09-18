@@ -70,7 +70,7 @@ class JobRetryConflict(ValueError):
     """Only failed or interrupted standalone jobs may be retried."""
 
 
-def enqueue_single_job(session, task_id, settings, prepare=None):
+def enqueue_single_job(session, task_id, settings, prepare=None, create_only=False):
     """Commit only after task inputs exist; conditional retry reserves the attempt.
 
     prepare runs while the transaction owns its write lock so two requests cannot
@@ -87,6 +87,12 @@ def enqueue_single_job(session, task_id, settings, prepare=None):
     )
     try:
         job = session.get(NoteJob, task_id)
+        if job is not None and create_only:
+            if job.batch_id is None and json.loads(job.settings_json) == snapshot:
+                # Replaying a creation may acknowledge any state but never starts
+                # another attempt or rewrites inputs/results of the existing job.
+                return job
+            raise JobRetryConflict("Task ID already belongs to another request")
         if job is None:
             job = NoteJob(task_id=task_id, batch_id=None, position=0, **values)
             session.add(job)

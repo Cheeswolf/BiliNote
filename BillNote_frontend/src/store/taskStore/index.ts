@@ -3,7 +3,6 @@ import { TaskStorageError } from '@/utils/polling'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { delete_task, generateNote } from '@/services/note.ts'
 import { v4 as uuidv4 } from 'uuid'
-import toast from 'react-hot-toast'
 import { get, set, del } from 'idb-keyval'
 
 export type TaskStatus =
@@ -53,6 +52,10 @@ export interface Markdown {
 
 export interface Task {
   id: string
+  parentTaskId?: string
+  rootTaskId?: string
+  // Distinguishes a confirmed retry receipt from the previous attempt after reload.
+  submissionId?: string
   markdown: string | Markdown[] //为了兼容之前的笔记
   // Optional for legacy history; explicitly selects imports and subsequent edits.
   currentMarkdownVersionId?: string
@@ -84,9 +87,13 @@ interface TaskStore {
   batchImportedAttempts: Record<string, number>
   currentTaskId: string | null
   storageError: string | null
+  recoveryTask: Task | null
+  submitting: boolean
+  submitTask: (formData: Task['formData'], sourceId?: string) => Promise<void>
+  saveRecoveredTask: () => Promise<void>
   connections: Record<string, TaskConnection>
   setTaskConnection: (id: string, connection: TaskConnection) => void
-  importCompletedTask: (task: Task, batchAttempt: number) => Promise<void>
+  importCompletedTask: (task: Task, batchAttempt: number, restore?: boolean) => Promise<void>
   addPendingTask: (taskId: string, platform: string, formData?: Task['formData']) => void
   updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
   removeTask: (id: string) => void
@@ -155,6 +162,13 @@ const mergeImportedTask = (existing: Task | undefined, incoming: Task): Task => 
 }
 
 type PersistedTaskState = Pick<TaskStore, 'tasks' | 'currentTaskId' | 'batchImportedAttempts'>
+const recoveryKey = 'single-task-recovery'
+const readRecoveryTask = (): Task | null => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(recoveryKey) || 'null') as Task | null
+    return saved && typeof saved.id === 'string' && saved.formData && saved.status ? saved : null
+  } catch { return null }
+}
 const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', PersistedTaskState]]> = (
   setTransient,
   getState,
@@ -180,14 +194,69 @@ const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', Persiste
         currentTaskId: null,
         connections: {},
         storageError: null,
+        recoveryTask: readRecoveryTask(),
+        submitting: false,
+        saveRecoveredTask: async () => {
+          await ensureTaskHistoryHydrated()
+          const recovery = get().recoveryTask
+          if (!recovery) return
+          // Polling may already have advanced this confirmed job in memory.
+          const existing = get().tasks.find(task => task.id === recovery.id)
+          const task = existing?.submissionId === recovery.submissionId ? existing ?? recovery : recovery
+          try {
+            await set(state => ({ tasks: [task, ...state.tasks.filter(item => item.id !== task.id)], currentTaskId: task.id }))
+            setTransient({ recoveryTask: null, storageError: null })
+            try { localStorage.removeItem(recoveryKey) } catch { /* In-memory recovery is still cleared. */ }
+          } catch (error) {
+            setTransient({ storageError: String(error) })
+            throw new TaskStorageError('任务已创建，保存历史失败。请重试保存任务记录。')
+          }
+        },
+        submitTask: async (formData, sourceId) => {
+          if (get().submitting) return
+          setTransient({ submitting: true })
+          try {
+            await ensureTaskHistoryHydrated()
+            if (get().recoveryTask) throw new TaskStorageError('请先重试保存已创建的任务记录')
+            const source = sourceId ? get().tasks.find(task => task.id === sourceId) : undefined
+            if (sourceId && !source) throw new Error('任务不存在')
+            if (source && !['SUCCESS', 'FAILED', 'INTERRUPTED', 'CANCELLED'].includes(source.status))
+              throw new Error('任务仍在生成，请等待完成')
+            const retry = source && ['FAILED', 'INTERRUPTED'].includes(source.status) &&
+              get().batchImportedAttempts[source.id] === undefined
+            const submissionId = uuidv4()
+            const taskId = retry ? source.id : submissionId
+            const response = await generateNote({
+              ...formData, style: formData.style ?? '', format: formData.format ?? [],
+              grid_size: formData.grid_size ?? [], task_id: taskId, create_only: !retry,
+              ...(source && !retry ? { parent_task_id: source.id } : {}),
+            })
+            if (!response?.task_id) throw new Error('服务器未返回任务 ID')
+            const task: Task = {
+              ...source, id: response.task_id, status: 'PENDING', formData, submissionId,
+              platform: formData.platform, createdAt: retry ? source.createdAt : new Date().toISOString(),
+              markdown: source?.markdown ?? '',
+              transcript: source?.transcript ?? { full_text: '', language: '', raw: null, segments: [] },
+              audioMeta: source?.audioMeta ?? { cover_url: '', duration: 0, file_path: '', platform: formData.platform, raw_info: null, title: '', video_id: '' },
+              ...(source && !retry ? { parentTaskId: source.id, rootTaskId: source.rootTaskId ?? source.id } : {}),
+            }
+            // Keep a separate recovery receipt across reload if IndexedDB rejects
+            // the confirmed server identity. Recovery only saves; it never pays again.
+            setTransient(state => ({ recoveryTask: task,
+              tasks: [task, ...state.tasks.filter(item => item.id !== task.id)], currentTaskId: task.id }))
+            try { localStorage.setItem(recoveryKey, JSON.stringify(task)) } catch { /* Keep the task ID visible in memory. */ }
+            try { await get().saveRecoveredTask() } catch { /* Recovery UI owns this actionable error. */ }
+          } finally { setTransient({ submitting: false }) }
+        },
         setTaskConnection: (id, connection) => {
           if (get().connections[id] === connection) return
           // Use the original Zustand setter: transient state must not call persist.setItem.
           setTransient(state => ({ connections: { ...state.connections, [id]: connection } }))
         },
-        importCompletedTask: async (task, batchAttempt) => {
+        importCompletedTask: async (task, batchAttempt, restore = false) => {
           const previousAttempt = get().batchImportedAttempts[task.id]
-          if (previousAttempt >= batchAttempt) return
+          const previousTask = get().tasks.find(item => item.id === task.id)
+          if (previousAttempt >= batchAttempt && !restore) return
           try {
             // One persisted snapshot commits the note and its acknowledgement together.
             await set(state => {
@@ -205,6 +274,12 @@ const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', Persiste
             if (previousAttempt === undefined) delete attempts[task.id]
             else attempts[task.id] = previousAttempt
             setTransient({ batchImportedAttempts: attempts })
+            if (restore) {
+              // A failed explicit restore must remain visibly deleted/restorable.
+              setTransient(state => ({ tasks: previousTask
+                ? state.tasks.map(item => item.id === task.id ? previousTask : item)
+                : state.tasks.filter(item => item.id !== task.id) }))
+            }
             throw new TaskStorageError('Task history storage unavailable: ' +
               (error instanceof Error ? error.message : String(error)))
           }
@@ -307,50 +382,9 @@ const createTaskStore: StateCreator<TaskStore, [], [['zustand/persist', Persiste
           return get().tasks.find(task => task.id === currentTaskId) || null
         },
         retryTask: async (id, payload) => {
-          if (!id) {
-            toast.error('任务不存在')
-            return
-          }
           const task = get().tasks.find(task => task.id === id)
-          console.log('retry', task)
-          if (!task) return
-
-          const newFormData = payload || task.formData
-          try {
-            await generateNote({
-              ...newFormData,
-              style: newFormData.style ?? '',
-              format: newFormData.format ?? [],
-              grid_size: newFormData.grid_size ?? [],
-              task_id: id,
-            })
-          } catch (e: unknown) {
-            const error = e as { data?: { reason?: string; downloading?: boolean } }
-            // 就绪门禁：转写模型未下载好。不要把任务标成 PENDING（会一直转），
-            // 给提示让用户先去下载。
-            if (error?.data?.reason === 'transcriber_model_not_ready') {
-              toast.error(
-                error?.data?.downloading
-                  ? '转写模型正在下载中，请稍候再重试'
-                  : '转写模型尚未下载，请先去「设置 → 音频转写配置」页下载'
-              )
-              return
-            }
-            console.error('重试任务失败：', e)
-            return
-          }
-
-          set(state => ({
-            tasks: state.tasks.map(t =>
-              t.id === id
-                ? {
-                    ...t,
-                    formData: newFormData, // ✅ 显式更新 formData
-                    status: 'PENDING',
-                  }
-                : t
-            ),
-          }))
+          if (!task) throw new Error('任务不存在')
+          await get().submitTask(payload || task.formData, id)
         },
 
         removeTask: async id => {

@@ -19,6 +19,7 @@ import 'katex/dist/katex.min.css'
 import 'github-markdown-css/github-markdown-light.css'
 import { ScrollArea } from '@/components/ui/scroll-area.tsx'
 import { useTaskStore } from '@/store/taskStore'
+import { pollingErrorMessage } from '@/utils/polling'
 import { noteStyles } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
 import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
@@ -324,6 +325,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const baseURL = (String(import.meta.env.VITE_API_BASE_URL || '').replace('/api','') || '').replace(/\/$/, '')
   const getCurrentTask = useTaskStore.getState().getCurrentTask
   const currentTask = useTaskStore(state => state.getCurrentTask())
+  const connection = useTaskStore(state => currentTask ? state.connections[currentTask.id] : undefined)
   const taskStatus = currentTask?.status || 'PENDING'
   const retryTask = useTaskStore.getState().retryTask
   const isMultiVersion = Array.isArray(currentTask?.markdown)
@@ -417,9 +419,19 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     document.body.removeChild(link)
   }
 
+  if (taskStatus === 'INTERRUPTED' || taskStatus === 'CANCELLED') {
+    return <div className="flex h-screen w-full flex-col items-center justify-center gap-4">
+      <p role="status" className="text-lg font-bold">{taskStatus === 'INTERRUPTED' ? '笔记生成已中断' : '笔记生成已取消'}</p>
+      <p className="text-sm text-muted-foreground">请在左侧检查设置后重新生成，已有笔记版本会保留。</p>
+    </div>
+  }
+
   if (status === 'loading') {
     return (
       <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-neutral-500">
+        {connection && connection !== 'online' && <p role="status" className="text-sm text-amber-800">
+          {connection === 'offline' ? '连接中断，将自动重试。' : '正在重连…'} 显示最近一次任务状态。
+        </p>}
         <StepBar steps={steps} currentStep={taskStatus} />
         <Loading className="h-5 w-5" />
         <div className="text-center text-sm">
@@ -450,7 +462,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
           <p className="text-lg font-bold text-red-500">笔记生成失败</p>
           <p className="mt-2 mb-2 text-xs text-red-400">请检查后台或稍后再试</p>
 
-          <Button onClick={() => retryTask(currentTask.id)} size="lg">
+          <Button onClick={() => { void retryTask(currentTask.id).catch(error => toast.error(pollingErrorMessage(error))) }} size="lg">
             重试
           </Button>
         </div>

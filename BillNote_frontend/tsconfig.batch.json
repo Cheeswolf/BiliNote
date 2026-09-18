@@ -11,6 +11,7 @@
     "src/hooks/useTaskPolling.ts",
     "src/hooks/useTaskPolling.test.tsx",
     "src/store/taskStore/index.ts",
+    "src/store/taskStore/submission.test.ts",
     "src/services/note.ts",
     "src/test/setup.ts",
     "src/vite-env.d.ts"

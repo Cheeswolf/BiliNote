@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 
 @dataclass(frozen=True)
@@ -10,8 +11,17 @@ class TaskWorkspace:
 
     @classmethod
     def for_task(cls, task_id: str, root: Path | str = Path("data/tasks")) -> "TaskWorkspace":
-        if not task_id or task_id in (".", "..") or any(c in task_id for c in '/\\:'):
-            raise ValueError("task_id must be a non-empty path component")
+        # A single portable spelling prevents Windows case/8.3/device/trailing
+        # dot aliases from sharing data while the database treats IDs as distinct.
+        reserved = {'con', 'prn', 'aux', 'nul', 'conin$', 'conout$'} | {
+            f'{prefix}{number}' for prefix in ('com', 'lpt') for number in range(1, 10)
+        }
+        if (not isinstance(task_id, str)
+                or not re.fullmatch(r'[a-z0-9_-][a-z0-9_.-]{0,127}', task_id)
+                or task_id.endswith('.') or task_id.split('.')[0] in reserved):
+            raise ValueError("task_id must be a canonical lowercase path component")
+        if (Path(root) / task_id).resolve().parent != Path(root).resolve():
+            raise ValueError("task_id workspace must stay inside its root")
         return cls(Path(root) / task_id)
 
     @property

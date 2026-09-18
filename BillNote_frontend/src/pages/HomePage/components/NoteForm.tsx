@@ -9,11 +9,11 @@ import { Form, FormControl, FormField, FormItem, FormMessage } from '@/component
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { generateNote } from '@/services/note'
 import { uploadFile } from '@/services/upload'
 import { useTaskStore } from '@/store/taskStore'
 import { useModelStore } from '@/store/modelStore'
 import { videoPlatforms } from '@/constant/note'
+import { pollingErrorMessage } from '@/utils/polling'
 import GenerationSettings from './GenerationSettings'
 import { generationDefaults, generationSettingsSchema, type GenerationSettingsValues } from './generationSettingsSchema'
 
@@ -37,7 +37,8 @@ export default function NoteForm() {
   const navigate = useNavigate()
   const [isUploading, setIsUploading] = useState(false)
   const [uploadSuccess, setUploadSuccess] = useState(false)
-  const { addPendingTask, currentTaskId, setCurrentTask, tasks, retryTask } = useTaskStore()
+  const [submissionError, setSubmissionError] = useState<string | null>(null)
+  const { submitTask, currentTaskId, setCurrentTask, tasks, recoveryTask, saveRecoveredTask, submitting } = useTaskStore()
   const models = useModelStore(state => state.modelList)
   const loadModels = useModelStore(state => state.loadEnabledModels)
   const currentTask = tasks.find(task => task.id === currentTaskId)
@@ -96,15 +97,11 @@ export default function NoteForm() {
     }
     const payload = {
       ...values, video_url: values.video_url || '', grid_size: values.grid_size ?? [2, 2],
-      provider_id: model.provider_id, task_id: currentTaskId || '',
+      provider_id: model.provider_id,
     }
-    if (currentTaskId) {
-      await retryTask(currentTaskId, payload)
-      return
-    }
+    setSubmissionError(null)
     try {
-      const data = await generateNote(payload)
-      if (data) addPendingTask(data.task_id, values.platform, payload)
+      await submitTask(payload, currentTaskId || undefined)
     } catch (cause: unknown) {
       const error = cause as { data?: { reason?: string; downloading?: boolean } }
       if (error?.data?.reason === 'transcriber_model_not_ready') {
@@ -113,7 +110,7 @@ export default function NoteForm() {
         if (!downloading) navigate('/settings/transcriber')
         return
       }
-      console.error('提交任务失败：', cause)
+      setSubmissionError(pollingErrorMessage(cause))
     }
   }
   const settingsError = Object.entries(form.formState.errors).find(([key]) => key !== 'video_url' && key !== 'platform')?.[1]
@@ -122,12 +119,18 @@ export default function NoteForm() {
       <Form {...form}>
         <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
           <div className="flex gap-2">
-            <Button type="submit" className={editing ? 'w-2/3' : 'w-full'} disabled={generating}>
+            <Button type="submit" className={editing ? 'w-2/3' : 'w-full'} disabled={generating || submitting || !!recoveryTask}>
               {generating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               {generating ? '正在生成…' : editing ? '重新生成' : '生成笔记'}
             </Button>
             {editing && <Button type="button" variant="outline" className="w-1/3" onClick={() => setCurrentTask(null)}><Plus className="mr-2 h-4 w-4" />新建笔记</Button>}
           </div>
+          {submissionError && <p role="alert" className="text-sm text-red-700">{submissionError}</p>}
+          {recoveryTask && <div role="alert" className="space-y-2 rounded border border-amber-300 p-3 text-sm">
+            <p>任务已创建，笔记历史尚未保存。任务 ID：<code className="break-all">{recoveryTask.id}</code></p>
+            <p>请重试保存任务记录；此操作不会再次提交生成任务。</p>
+            <Button type="button" variant="outline" onClick={() => { void saveRecoveredTask().catch(error => setSubmissionError(pollingErrorMessage(error))) }}>重试保存任务记录</Button>
+          </div>}
           <h2 className="text-sm font-medium">视频链接</h2>
           <div className="flex gap-2">
             <FormField control={form.control} name="platform" render={({ field }) => (

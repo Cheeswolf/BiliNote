@@ -1,6 +1,6 @@
 # Batch video notes: recovery and smoke-test evidence
 
-Date: 2026-09-15; latest live source acceptance update: 2026-09-17 (Asia/Shanghai). Branch: `feature/batch-video-notes`.
+Date: 2026-09-15; latest automated verification: 2026-09-18; live source acceptance: 2026-09-17 (Asia/Shanghai). Branch: `feature/batch-video-notes`.
 Production-code baseline: `6cc6be320ff65b46630cf371453d976e5557e866`.
 The original Task 9 commit adds the integration test and this record. The notification follow-up below also changes frontend production code.
 
@@ -14,6 +14,59 @@ observations are recorded with their limits. A fully UI-driven creation workflow
 and packaged Tauri exit/reopen acceptance remain open; source-process evidence
 does not establish packaged desktop lifecycle behavior. Earlier dated sections
 retain their historical test results and pre-live-run acceptance status.
+
+## Final recovery/regeneration review fixes — 2026-09-18
+
+Starting HEAD: `17c2aaa`. This verification covers the combined final-review fixes;
+older results below remain historical. Final source checks observed:
+
+| Check | Observed result | Exit |
+| --- | --- | --- |
+| Complete backend suite (`pytest tests -q`) | 258 passed, 3 subtests passed, 47.83s | 0 |
+| Recovery integration | 1 passed, 12.09s | 0 |
+| Complete frontend suite | 143 passed across 13 files, 19.64s; no unhandled errors | 0 |
+| Scoped TypeScript | No diagnostics | 0 |
+| Full-app TypeScript | 116 diagnostics, exact unchanged HEAD baseline | 2 (compiler), 0 (comparison) |
+| Changed-file ESLint | 9 files clean; viewer exactly retains 24 errors / 1 warning | 0 (comparison) |
+| Production Vite build | 17,802 modules, 55.03s; existing warnings | 0 |
+| Whitespace checks | No errors | 0 |
+
+The full-app TypeScript comparison includes the viewer and its tests. Baseline
+and working diagnostics match by file, code, category, message and source span.
+Viewer ESLint matches rule, severity, message, columns and exact source span as a
+multiset after line shifts; no added or removed diagnostics. Neither comparison
+claims clean full-app TypeScript or full-repository lint.
+
+Recovery now acquires an OS scheduler lock beside the resolved SQLite database
+before reading unfinished jobs. A second process cannot recover or claim a live
+owner's jobs. Signed, checksummed final/summary/checkpoint artifacts can be reused
+after interruption, including a partially merged summary. Changed request inputs,
+changed transcript language, edited caches and missing downloaded audio are
+covered. Optional transcript metadata survives cache round trips and does not
+spuriously repeat GPT. Mobile YouTube watch/shorts preview URLs validate for
+execution after hostname normalization.
+
+Successful-note regeneration creates a fresh linked standalone job and preserves
+source versions and original batch status. Submission waits for task-history
+hydration, and confirmed jobs survive a failed history write through a separate
+save-only recovery receipt. Reload tests cover new jobs and retries over stale
+failed records. Deleted batch notes remain deleted until **恢复并打开笔记**;
+a failed restore remains actionable. Interrupted/cancelled and reconnect states
+are explicit. Model-configuration HTTP is mocked in viewer tests, and the retry
+error handler is covered without unhandled promises.
+
+No SQL migration is required. Request fields and frontend lineage/receipt fields
+are additive. Unsigned old caches are not trusted for resume; existing successful
+notes remain readable. Canonical UUID/lowercase IDs remain compatible; unsafe
+Windows aliases are rejected for new workspaces. Local SQLite is required:
+remote database backends fail before scheduling until distributed ownership is
+implemented. The persistent lock file must not be manually removed while a
+scheduler is alive.
+
+The local handoff report is
+`.superpowers/sdd/2026-09-10-batch-video-notes/final-fix-integration-report.md`.
+Live source generation was not repeated here. The packaged Tauri and complete
+UI-driven acceptance limitations below remain open.
 
 ## Reproducible automated checks
 

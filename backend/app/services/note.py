@@ -29,6 +29,9 @@ from app.models.model_config import ModelConfig
 from app.models.notes_model import AudioDownloadResult, NoteResult
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.services.task_workspace import TaskWorkspace
+from app.services.note_artifacts import (
+    atomic_write, digest, generation_signature, load_signed, prepare_media, save_signed,
+)
 from app.services.constant import SUPPORT_PLATFORM_MAP
 from app.services.provider import ProviderService
 from app.transcriber.base import Transcriber
@@ -125,6 +128,8 @@ class NoteGenerator:
         """
         if workspace is not None and workspace.task_id != task_id:
             raise ValueError("workspace does not belong to task_id")
+        TaskWorkspace.for_task(task_id or str(uuid.uuid4()))
+        self._cache_signature = generation_signature(locals())
         self._status_callback = status_callback
         self.workspace = workspace or TaskWorkspace.for_task(task_id or str(uuid.uuid4()))
         self.video_path = None
@@ -142,10 +147,12 @@ class NoteGenerator:
             gpt = self._get_gpt(model_name, provider_id)
 
             self.workspace.root.mkdir(parents=True, exist_ok=True)
-            self.workspace.media.mkdir(parents=True, exist_ok=True)
+            prepare_media(self.workspace, self._cache_signature)
             output_path = str(self.workspace.media) if workspace or not output_path else output_path
             if workspace and hasattr(gpt, "checkpoint_dir"):
                 gpt.checkpoint_dir = workspace.root
+            gpt.generation_signature = self._cache_signature
+            gpt.provider_id = provider_id
 
             # Legacy callers keep their existing transcript/prefetch cache layout.
             NOTE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -160,12 +167,14 @@ class NoteGenerator:
             if transcript_cache_file.exists():
                 logger.info(f"检测到转写缓存 ({transcript_cache_file})，尝试读取")
                 try:
-                    data = json.loads(transcript_cache_file.read_text(encoding="utf-8"))
+                    data = load_signed(transcript_cache_file, self._cache_signature)
+                    if data is None:
+                        raise ValueError('transcript signature mismatch')
                     segments = [TranscriptSegment(**seg) for seg in data.get("segments", [])]
                     transcript = TranscriptResult(
                         language=data.get("language"),
                         full_text=data["full_text"],
-                        segments=segments,
+                        segments=segments, raw=data.get("raw"),
                     )
                     logger.info(f"已从缓存加载转写结果，共 {len(segments)} 段")
                 except Exception as e:
@@ -178,10 +187,7 @@ class NoteGenerator:
                     transcript = downloader.download_subtitles(video_url, output_dir=str(self.workspace.media))
                     if transcript and transcript.segments:
                         logger.info(f"成功获取平台字幕，共 {len(transcript.segments)} 段")
-                        transcript_cache_file.write_text(
-                            json.dumps(asdict(transcript), ensure_ascii=False, indent=2),
-                            encoding="utf-8",
-                        )
+                        save_signed(transcript_cache_file, asdict(transcript), self._cache_signature)
                     else:
                         transcript = None
                         logger.info("平台无可用字幕，将下载音频后转写")
@@ -428,8 +434,15 @@ class NoteGenerator:
         if audio_cache_file.exists():
             logger.info(f"检测到音频缓存 ({audio_cache_file})，直接读取")
             try:
-                data = json.loads(audio_cache_file.read_text(encoding="utf-8"))
+                data = load_signed(audio_cache_file, self._cache_signature)
+                if data is None:
+                    raise ValueError('media signature mismatch')
+                metadata_only = data.pop('_metadata_only', False)
                 cached = AudioDownloadResult(**data)
+                if not metadata_only and not Path(cached.file_path).is_file():
+                    raise ValueError('cached audio file is missing')
+                if metadata_only and not skip_download:
+                    raise ValueError('cached metadata has no audio')
                 if not (screenshot or video_understanding):
                     return cached
                 if cached.video_path and Path(cached.video_path).exists():
@@ -450,10 +463,7 @@ class NoteGenerator:
                     need_video=False,
                     skip_download=True,
                 )
-                audio_cache_file.write_text(
-                    json.dumps(asdict(audio), ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                save_signed(audio_cache_file, {**asdict(audio), '_metadata_only': True}, self._cache_signature)
                 logger.info(f"元信息提取完成 ({audio_cache_file})")
                 return audio
             except Exception as exc:
@@ -488,7 +498,7 @@ class NoteGenerator:
             )
             if self.video_path:
                 audio.video_path = str(self.video_path)
-            audio_cache_file.write_text(json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8")
+            save_signed(audio_cache_file, {**asdict(audio), '_metadata_only': False}, self._cache_signature)
             logger.info(f"音频下载并缓存成功 ({audio_cache_file})")
             return audio
         except Exception as exc:
@@ -533,9 +543,11 @@ class NoteGenerator:
         if transcript_cache_file.exists():
             logger.info(f"检测到转写缓存 ({transcript_cache_file})，尝试读取")
             try:
-                data = json.loads(transcript_cache_file.read_text(encoding="utf-8"))
+                data = load_signed(transcript_cache_file, self._cache_signature)
+                if data is None:
+                    raise ValueError('transcript signature mismatch')
                 segments = [TranscriptSegment(**seg) for seg in data.get("segments", [])]
-                return TranscriptResult(language=data.get("language"), full_text=data["full_text"], segments=segments)
+                return TranscriptResult(language=data.get("language"), full_text=data["full_text"], segments=segments, raw=data.get("raw"))
             except Exception as e:
                 logger.warning(f"加载转写缓存失败，将重新获取：{e}")
 
@@ -546,10 +558,7 @@ class NoteGenerator:
             if transcript and transcript.segments:
                 logger.info(f"成功获取平台字幕，共 {len(transcript.segments)} 段")
                 # 缓存结果
-                transcript_cache_file.write_text(
-                    json.dumps(asdict(transcript), ensure_ascii=False, indent=2),
-                    encoding="utf-8"
-                )
+                save_signed(transcript_cache_file, asdict(transcript), self._cache_signature)
                 return transcript
             else:
                 logger.info("平台无可用字幕，将使用音频转写")
@@ -585,9 +594,11 @@ class NoteGenerator:
         if transcript_cache_file.exists():
             logger.info(f"检测到转写缓存 ({transcript_cache_file})，尝试读取")
             try:
-                data = json.loads(transcript_cache_file.read_text(encoding="utf-8"))
+                data = load_signed(transcript_cache_file, self._cache_signature)
+                if data is None:
+                    raise ValueError('transcript signature mismatch')
                 segments = [TranscriptSegment(**seg) for seg in data.get("segments", [])]
-                return TranscriptResult(language=data["language"], full_text=data["full_text"], segments=segments)
+                return TranscriptResult(language=data["language"], full_text=data["full_text"], segments=segments, raw=data.get("raw"))
             except Exception as e:
                 logger.warning(f"加载转写缓存失败，将重新转写：{e}")
 
@@ -598,7 +609,7 @@ class NoteGenerator:
             if self.transcriber is None:
                 self.transcriber = self._init_transcriber()
             transcript = self.transcriber.transcript(file_path=audio_file)
-            transcript_cache_file.write_text(json.dumps(asdict(transcript), ensure_ascii=False, indent=2), encoding="utf-8")
+            save_signed(transcript_cache_file, asdict(transcript), self._cache_signature)
             logger.info(f"转写并缓存成功 ({transcript_cache_file})")
             return transcript
         except Exception as exc:
@@ -635,6 +646,13 @@ class NoteGenerator:
         """
         self._report(task_id, TaskStatus.SUMMARIZING)
 
+        summary_signature = digest(dict(request=self._cache_signature,
+            transcript=asdict(transcript), audio=asdict(audio_meta), images=video_img_urls))
+        checkpoint = markdown_cache_file.with_suffix('.checkpoint.json')
+        cached = load_signed(checkpoint, summary_signature)
+        if cached and isinstance(cached.get('markdown'), str) and cached['markdown'].strip():
+            return cached['markdown']
+
         source = GPTSource(
             title=audio_meta.title,
             segment=transcript.segments,
@@ -647,10 +665,14 @@ class NoteGenerator:
             extras=extras,
             checkpoint_key=task_id,
         )
+        # Also bind partial checkpoints to transcript language/full text and the
+        # complete request even when the rendered prompt happens to be identical.
+        gpt.generation_signature = summary_signature
 
         try:
             markdown = gpt.summarize(source)
-            markdown_cache_file.write_text(markdown, encoding="utf-8")
+            save_signed(checkpoint, {'markdown': markdown}, summary_signature)
+            atomic_write(markdown_cache_file, markdown)
             logger.info(f"GPT 总结并缓存成功 ({markdown_cache_file})")
             return markdown
         except Exception as exc:

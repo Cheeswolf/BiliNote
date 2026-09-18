@@ -9,6 +9,8 @@ export const generateNote = async (data: {
   model_name: string
   provider_id: string
   task_id?: string
+  create_only?: boolean
+  parent_task_id?: string
   format: Array<string>
   style: string
   extras?: string

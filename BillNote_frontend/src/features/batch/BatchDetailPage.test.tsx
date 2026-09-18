@@ -119,6 +119,40 @@ it('keeps server stages visible while connection is lost', async () => {
   expect(screen.getByText('生成中')).toBeTruthy()
   expect(screen.queryByText('失败')).toBeNull()
 })
+
+it('shows a deleted imported note after restart and restores it only on explicit action', async () => {
+  const detail = { ...detailWithJob('SUCCESS'), status: 'COMPLETED' as const }
+  await useBatchStore.getState().importSuccessfulTasks(detail)
+  await useTaskStore.getState().removeTask('task-1')
+  await useTaskStore.persist.rehydrate()
+  vi.mocked(get_task_status).mockClear()
+  vi.mocked(getBatch).mockResolvedValue(detail)
+  mount()
+  await screen.findByText(/已从笔记历史删除/)
+  expect(screen.queryByText('正在载入笔记，将自动重试')).toBeNull()
+  expect(get_task_status).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: '恢复并打开笔记' }))
+  await screen.findByText('原有笔记预览')
+  expect(get_task_status).toHaveBeenCalledTimes(1)
+  expect(useTaskStore.getState().getCurrentTask()?.id).toBe('task-1')
+})
+
+it('keeps restoration actionable if the restored note cannot be persisted', async () => {
+  const detail = { ...detailWithJob('SUCCESS'), status: 'COMPLETED' as const }
+  await useBatchStore.getState().importSuccessfulTasks(detail)
+  await useTaskStore.getState().removeTask('task-1')
+  vi.mocked(getBatch).mockResolvedValue(detail)
+  mount()
+  await screen.findByText(/已从笔记历史删除/)
+  const write = vi.spyOn(useTaskStore.persist.getOptions().storage!, 'setItem').mockRejectedValueOnce(new Error('disk full'))
+  await userEvent.click(screen.getByRole('button', { name: '恢复并打开笔记' }))
+  expect((await screen.findByRole('alert')).textContent).toContain('disk full')
+  write.mockRestore()
+  expect(screen.getByRole('button', { name: '恢复并打开笔记' })).toBeTruthy()
+  await userEvent.click(screen.getByRole('button', { name: '恢复并打开笔记' }))
+  await screen.findByText('原有笔记预览')
+  expect(useTaskStore.getState().getCurrentTask()?.id).toBe('task-1')
+})
 it('shows a management error without changing the server status and permits retry', async () => {
   vi.mocked(pauseBatch).mockRejectedValue(new Error('cannot pause'))
   mount()

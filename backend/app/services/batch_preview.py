@@ -199,6 +199,8 @@ def _normalize_url(parsed, platform: str) -> str:
         path = re.sub(r"/p\d+$", "", path)
         query = _canonical_query(parsed, "p", str(page) if page is not None else None)
     elif platform == "youtube":
+        if hostname == "m.youtube.com":
+            hostname = "www.youtube.com"
         video_id = next((value for key, value in parse_qsl(parsed.query) if key == "v"), None)
         query = _canonical_query(parsed, "v", video_id)
     else:

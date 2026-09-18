@@ -8,7 +8,7 @@ import { pauseBatch, resumeBatch, retryFailed, cancelPending } from './api'
 import { useBatchStore } from './store'
 import { useBatchPolling } from './useBatchPolling'
 import { batchLabels, dateLabel, durationLabel, jobLabels, platformLabel } from './presentation'
-import type { BatchDetail } from './types'
+import type { BatchDetail, BatchJobSummary } from './types'
 import BatchProgress from './BatchProgress'
 import BatchShell from './BatchShell'
 
@@ -19,6 +19,7 @@ export default function BatchDetailPage() {
   const connection = useBatchStore(state => state.connection)
   const pollingError = useBatchStore(state => state.error)
   const tasks = useTaskStore(state => state.tasks)
+  const importedAttempts = useTaskStore(state => state.batchImportedAttempts)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   useBatchPolling(batchId)
@@ -39,6 +40,15 @@ export default function BatchDetailPage() {
       useTaskStore.getState().setCurrentTask(taskId)
       navigate('/')
     } catch (error) { setError(pollingErrorMessage(error)) }
+  }
+  const restoreNote = async (job: BatchJobSummary) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await useBatchStore.getState().restoreSuccessfulTask(job)
+      openNote(job.task_id)
+    } catch (error) { setError(pollingErrorMessage(error)) }
+    finally { setBusy(false) }
   }
   return (
     <BatchShell>
@@ -70,6 +80,7 @@ export default function BatchDetailPage() {
           <h2 className="text-sm font-medium">视频列表 · 按输入顺序执行</h2>
           {[...detail.jobs].sort((a, b) => a.position - b.position).map(job => {
             const ready = tasks.some(task => task.id === job.task_id && task.status === 'SUCCESS')
+            const deleted = !tasks.some(task => task.id === job.task_id) && importedAttempts[job.task_id] >= job.attempt
             return <article key={job.task_id} className="flex items-start gap-4 rounded-xl border bg-white p-4">
               <span className="pt-1 text-sm text-muted-foreground">{job.position + 1}</span>
               {job.cover_url ? <img src={job.cover_url} alt="" referrerPolicy="no-referrer" loading="lazy" className="hidden h-16 w-28 shrink-0 rounded-md bg-neutral-100 object-cover sm:block" />
@@ -83,8 +94,13 @@ export default function BatchDetailPage() {
               <div className="shrink-0 space-y-2 text-right">
                 <p className={'text-sm ' + (job.status === 'SUCCESS' ? 'text-emerald-700' : ['FAILED', 'INTERRUPTED'].includes(job.status) ? 'text-amber-800' : 'text-neutral-600')}>{jobLabels[job.status]}</p>
                 {job.status === 'SUCCESS' && <>
-                  <Button size="sm" variant="outline" disabled={!ready} onClick={() => openNote(job.task_id)}>打开笔记</Button>
-                  {!ready && <p className="max-w-28 text-xs text-muted-foreground">正在载入笔记，将自动重试</p>}
+                  {deleted ? <>
+                    <Button size="sm" variant="outline" disabled={busy} onClick={() => { void restoreNote(job) }}>恢复并打开笔记</Button>
+                    <p className="max-w-36 text-xs text-muted-foreground">已从笔记历史删除，可恢复</p>
+                  </> : <>
+                    <Button size="sm" variant="outline" disabled={!ready} onClick={() => openNote(job.task_id)}>打开笔记</Button>
+                    {!ready && <p className="max-w-28 text-xs text-muted-foreground">正在载入笔记，将自动重试</p>}
+                  </>}
                 </>}
               </div>
             </article>

@@ -22,13 +22,14 @@ interface BatchStore {
   setList: (list: BatchList) => void
   setConnection: (connection: ConnectionStatus) => void
   importSuccessfulTasks: (detail: BatchDetail) => Promise<void>
+  restoreSuccessfulTask: (job: BatchJobSummary) => Promise<void>
 }
 // Serialize result retrieval across all batch callers, including overlapping mounts.
 let importQueue: Promise<void> = Promise.resolve()
-const importJob = async (job: BatchJobSummary) => {
+const importJob = async (job: BatchJobSummary, restore = false) => {
   await ensureTaskHistoryHydrated()
   const previousAttempt = useTaskStore.getState().batchImportedAttempts[job.task_id]
-  if (previousAttempt >= job.attempt) return
+  if (previousAttempt >= job.attempt && !restore) return
   // A legacy note has no attempt provenance: retrieve the current result before acknowledging it.
   {
     const response = await get_task_status(job.task_id, { suppressToast: true })
@@ -75,7 +76,7 @@ const importJob = async (job: BatchJobSummary) => {
         grid_size: [],
         style: '',
       },
-    }, job.attempt)
+    }, job.attempt, restore)
   }
 }
 export const useBatchStore = create<BatchStore>((set, get) => ({
@@ -110,6 +111,13 @@ export const useBatchStore = create<BatchStore>((set, get) => ({
   setActive: active => set({ active }),
   setList: list => set({ list }),
   setConnection: connection => set({ connection }),
+  restoreSuccessfulTask: job => {
+    const next = importQueue.then(async () => {
+      await importJob(job, true)
+    })
+    importQueue = next.catch(() => {})
+    return next
+  },
   importSuccessfulTasks: detail => {
     const next = importQueue.then(async () => {
       const failures: unknown[] = []
