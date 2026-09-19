@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Markmap } from 'markmap-view'
-import { transformer } from '@/lib/markmap.ts'
+import { initializeMarkmapAssets, transformer } from '@/lib/markmap.ts'
 import { Toolbar } from 'markmap-toolbar'
 import 'markmap-toolbar/dist/style.css'
 import JSZip from 'jszip'
@@ -527,6 +527,7 @@ export default function MarkmapEditor({
   // 初始化 Markmap 实例 + Toolbar
   useEffect(() => {
     if (!svgRef.current || mmRef.current) return
+    void initializeMarkmapAssets()
     const mm = Markmap.create(svgRef.current)
     mmRef.current = mm
 
