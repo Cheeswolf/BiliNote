@@ -12,6 +12,19 @@ from app.db.provider_dao import (
 )
 from app.gpt.gpt_factory import GPTFactory
 from app.models.model_config import ModelConfig
+from app.gpt.provider_identity import resolve_base_url
+
+
+def resolve_provider_config(provider_id):
+    """Take one execution-time snapshot, including the resolved SDK endpoint."""
+    if provider_id is None:
+        return None
+    provider = ProviderService.get_provider_by_id(provider_id)
+    if not provider:
+        from app.enmus.exception import ProviderErrorEnum
+        from app.exceptions.provider import ProviderError
+        raise ProviderError(code=ProviderErrorEnum.NOT_FOUND, message=ProviderErrorEnum.NOT_FOUND.message)
+    return {**provider, 'base_url': resolve_base_url(provider.get('base_url'))}
 
 
 class ProviderService:

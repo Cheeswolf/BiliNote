@@ -28,6 +28,9 @@ def workspace_for(task_id, root):
 
 @pytest.fixture
 def pipeline(tmp_path, monkeypatch):
+    monkeypatch.setattr(note_service.ProviderService, 'get_provider_by_id', lambda provider_id: {
+        'id': provider_id, 'name': 'Fixture', 'type': 'custom',
+        'api_key': 'offline-key', 'base_url': 'https://fixture.example/v1'})
     monkeypatch.setattr(note_service, 'NOTE_OUTPUT_DIR', tmp_path / 'legacy')
     monkeypatch.setattr(note_service, 'IMAGE_OUTPUT_DIR', str(tmp_path / 'static'))
     monkeypatch.setattr(note_service, 'IMAGE_BASE_URL', '/static/screenshots')
@@ -63,10 +66,11 @@ def pipeline(tmp_path, monkeypatch):
     downloader = Downloader()
     gpt = SimpleNamespace(summarize=lambda source: sources.append(source) or '# Lesson', checkpoint_dir=tmp_path / 'old-checkpoints')
     monkeypatch.setattr(note_service.NoteGenerator, '_get_downloader', lambda self, platform: downloader)
+    original_get_gpt = note_service.NoteGenerator._get_gpt
     monkeypatch.setattr(note_service.NoteGenerator, '_get_gpt', lambda *a: gpt)
     monkeypatch.setattr(note_service, 'VideoReader', Reader)
     return SimpleNamespace(init_calls=init_calls, downloads=downloads, readers=readers, sources=sources,
-                           downloader=downloader, transcript=transcript, gpt=gpt)
+                           downloader=downloader, transcript=transcript, gpt=gpt, original_get_gpt=original_get_gpt)
 
 
 def test_task_workspaces_do_not_share_paths_and_create_nothing_until_used(tmp_path):

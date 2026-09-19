@@ -39,12 +39,21 @@ class SchedulerOwnership:
     def __init__(self, session_factory):
         with session_factory() as session:
             url = session.get_bind().url
-        if url.get_backend_name() == 'sqlite' and url.database not in (None, '', ':memory:'):
-            self.path = Path(str(Path(url.database).resolve()) + '.note-queue.lock')
-        elif url.get_backend_name() == 'sqlite':
-            self.path = Path('data/note-queue.lock').resolve()
-        else:
-            raise RuntimeError('Note queue scheduler currently requires a local SQLite database')
+            if url.get_backend_name() != 'sqlite':
+                raise RuntimeError('Note queue scheduler currently requires a local SQLite database')
+            if (url.database in (None, '', ':memory:')
+                    or url.database.lower().startswith('file:') or 'uri' in url.query):
+                raise RuntimeError('Note queue scheduler requires an ordinary file-backed SQLite URL; '
+                                   'SQLite URI and in-memory modes are unsupported')
+            # SQLAlchemy resolves ordinary relative paths when the engine is
+            # created, not here. Ask its actual connection for the main file:
+            # resolving url.database against a later cwd can lock the wrong DB.
+            databases = session.connection().exec_driver_sql('PRAGMA database_list').all()
+            filename = next((row[2] for row in databases if row[1] == 'main'), '')
+            if not filename:
+                raise RuntimeError('Note queue scheduler requires a file-backed SQLite database')
+            canonical = os.path.normcase(str(Path(filename).resolve()))
+            self.path = Path(canonical + '.note-queue.lock')
         self.stream = None
 
     def acquire(self):

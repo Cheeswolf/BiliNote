@@ -70,6 +70,9 @@ def test_failed_atomic_save_preserves_previous_result(tmp_path, monkeypatch, not
 
 @pytest.fixture
 def runner(tmp_path, monkeypatch, note):
+    monkeypatch.setattr(note_service.ProviderService, 'get_provider_by_id', lambda provider_id: {
+        'id': provider_id, 'name': 'Fixture', 'type': 'custom',
+        'api_key': 'offline-key', 'base_url': 'https://fixture.example/v1'})
     monkeypatch.setattr(note_router, 'NOTE_OUTPUT_DIR', str(tmp_path))
     monkeypatch.setattr(note_service, 'NOTE_OUTPUT_DIR', tmp_path)
     monkeypatch.setattr(note_service.NoteGenerator, '_init_transcriber', lambda self: None)

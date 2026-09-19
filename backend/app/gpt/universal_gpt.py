@@ -11,6 +11,7 @@ from pathlib import Path
 from app.gpt.prompt import BASE_PROMPT, AI_SUM, SCREENSHOT, LINK, MERGE_PROMPT
 from app.gpt.utils import fix_markdown
 from app.gpt.request_chunker import RequestChunker
+from app.gpt.provider_identity import provider_identity
 from app.models.transcriber_model import TranscriptSegment
 from datetime import timedelta
 from typing import List
@@ -103,7 +104,8 @@ class UniversalGPT(GPT):
         payload = {
             "generation_signature": getattr(self, 'generation_signature', None),
             "provider_id": getattr(self, 'provider_id', None),
-            "base_url": str(getattr(self.client, 'base_url', '')),
+            "provider": provider_identity({'base_url': getattr(self.client, 'base_url', None),
+                                           'type': getattr(self, 'provider_type', None)}),
             "link": source.link,
             "screenshot": source.screenshot,
             "rendered_prompt": self.create_messages(source.segment, title=source.title,

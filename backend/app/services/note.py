@@ -33,7 +33,7 @@ from app.services.note_artifacts import (
     atomic_write, digest, generation_signature, load_signed, prepare_media, save_signed,
 )
 from app.services.constant import SUPPORT_PLATFORM_MAP
-from app.services.provider import ProviderService
+from app.services.provider import ProviderService, resolve_provider_config
 from app.transcriber.base import Transcriber
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
 from app.utils.note_helper import replace_content_markers, prepend_source_link
@@ -105,6 +105,7 @@ class NoteGenerator:
         grid_size: Optional[List[int]] = None,
         workspace: Optional[TaskWorkspace] = None,
         status_callback: Optional[Callable[[TaskStatus, str], None]] = None,
+        provider_config: Optional[dict] = None,
     ) -> NoteResult | None:
         """
         主流程：按步骤依次下载、转写、GPT 总结、截图/链接处理、存库、返回 NoteResult。
@@ -129,7 +130,6 @@ class NoteGenerator:
         if workspace is not None and workspace.task_id != task_id:
             raise ValueError("workspace does not belong to task_id")
         TaskWorkspace.for_task(task_id or str(uuid.uuid4()))
-        self._cache_signature = generation_signature(locals())
         self._status_callback = status_callback
         self.workspace = workspace or TaskWorkspace.for_task(task_id or str(uuid.uuid4()))
         self.video_path = None
@@ -138,13 +138,15 @@ class NoteGenerator:
             grid_size = []
 
         try:
+            provider_config = provider_config or resolve_provider_config(provider_id)
+            self._cache_signature = generation_signature(locals(), provider_config=provider_config)
             logger.info(f"开始生成笔记 (task_id={task_id})")
             self._report(task_id, TaskStatus.PARSING)
 
             # 获取下载器与 GPT 实例
 
             downloader = self._get_downloader(platform)
-            gpt = self._get_gpt(model_name, provider_id)
+            gpt = self._get_gpt(model_name, provider_id, provider_config)
 
             self.workspace.root.mkdir(parents=True, exist_ok=True)
             prepare_media(self.workspace, self._cache_signature)
@@ -294,14 +296,14 @@ class NoteGenerator:
         logger.info(f"使用转写器：{self.transcriber_type}")
         return get_transcriber(transcriber_type=self.transcriber_type)
 
-    def _get_gpt(self, model_name: Optional[str], provider_id: Optional[str]) -> GPT:
+    def _get_gpt(self, model_name: Optional[str], provider_id: Optional[str], provider_config=None) -> GPT:
         """
         根据 provider_id 获取对应的 GPT 实例
         :param model_name: GPT 模型名称
         :param provider_id: 供应商 ID
         :return: GPT 实例
         """
-        provider = ProviderService.get_provider_by_id(provider_id)
+        provider = provider_config or resolve_provider_config(provider_id)
         if not provider:
             logger.error(f"[get_gpt] 未找到模型供应商: provider_id={provider_id}")
             raise ProviderError(code=ProviderErrorEnum.NOT_FOUND,message=ProviderErrorEnum.NOT_FOUND.message)

@@ -239,7 +239,8 @@ def test_context_preparation_failure_is_terminal(sessions):
 
 
 @pytest.mark.parametrize('operation', ['start', 'recover_interrupted_jobs', 'run_once'])
-def test_second_process_cannot_recover_or_claim_live_owner_jobs(sessions, tmp_path, operation):
+@pytest.mark.parametrize('database_form', ['absolute', 'relative-before-chdir', 'sqlite-uri'])
+def test_second_process_cannot_recover_or_claim_live_owner_jobs(sessions, tmp_path, operation, database_form):
     queue_module = load_queue_module()
     entered, release = threading.Event(), threading.Event()
     def runner(context):
@@ -251,26 +252,38 @@ def test_second_process_cannot_recover_or_claim_live_owner_jobs(sessions, tmp_pa
     owner.wake()
     assert entered.wait(3)
     script = '''
+import os
 import sys
 from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.services.note_queue import NoteQueueService
-engine = create_engine('sqlite:///' + sys.argv[1])
-queue = NoteQueueService(sessionmaker(bind=engine), lambda context: Path(sys.argv[3]).touch())
+database = Path(sys.argv[1])
+original_cwd = Path.cwd()
+if sys.argv[4] == 'relative-before-chdir':
+    os.chdir(database.parent)
+    engine = create_engine('sqlite:///' + database.name)
+    os.chdir(original_cwd)
+elif sys.argv[4] == 'sqlite-uri':
+    engine = create_engine('sqlite:///file:' + database.as_posix() + '?mode=rw&uri=true')
+else:
+    engine = create_engine('sqlite:///' + str(database))
+queue = None
 try:
+    queue = NoteQueueService(sessionmaker(bind=engine), lambda context: Path(sys.argv[3]).touch())
     getattr(queue, sys.argv[2])()
 except RuntimeError as error:
-    assert 'already' in str(error)
+    assert 'already' in str(error) or 'SQLite' in str(error)
     sys.exit(23)
 finally:
-    queue.stop()
+    if queue is not None:
+        queue.stop()
 '''
     try:
         elsewhere = tmp_path / 'other-working-directory'
         elsewhere.mkdir()
         child = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'queue.db'),
-            operation, str(tmp_path / 'wrong-runner')], cwd=elsewhere,
+            operation, str(tmp_path / 'wrong-runner'), database_form], cwd=elsewhere,
             env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1])),
             capture_output=True, text=True, timeout=35,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -338,3 +351,39 @@ def test_remote_database_is_rejected_before_recovery_or_claim():
     session = SimpleNamespace(get_bind=lambda: SimpleNamespace(url=make_url('postgresql://localhost/notes')))
     with pytest.raises(RuntimeError, match='local SQLite'):
         queue_module.NoteQueueService(lambda: nullcontext(session), lambda context: None)
+
+
+@pytest.mark.parametrize('database_url', [
+    'sqlite://', 'sqlite:///:memory:',
+    'sqlite:///file:queue.db?mode=rw&uri=true',
+    'sqlite:///file::memory:?cache=shared&uri=true',
+    'sqlite:///queue.db?uri=true',
+])
+def test_unsupported_sqlite_modes_are_rejected_before_opening_database(tmp_path, monkeypatch, database_url):
+    from sqlalchemy import event
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine(database_url)
+    @event.listens_for(engine, 'connect')
+    def unexpected_connection(*args):
+        pytest.fail('unsupported database connected before validation')
+    try:
+        with pytest.raises(RuntimeError, match='SQLite'):
+            load_queue_module().NoteQueueService(sessionmaker(bind=engine), lambda context: None)
+        assert not list(tmp_path.glob('*.note-queue.lock'))
+    finally:
+        engine.dispose()
+
+
+def test_relative_database_lock_uses_engine_creation_directory_without_prior_connection(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    engine = create_engine('sqlite:///queue.db')
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    try:
+        service = load_queue_module().NoteQueueService(sessionmaker(bind=engine), lambda context: None)
+        assert service._ownership.path == tmp_path / 'queue.db.note-queue.lock'
+        assert (tmp_path / 'queue.db').is_file()
+        assert not (elsewhere / 'queue.db').exists()
+    finally:
+        engine.dispose()

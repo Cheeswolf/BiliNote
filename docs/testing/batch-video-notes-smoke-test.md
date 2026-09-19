@@ -1,6 +1,6 @@
 # Batch video notes: recovery and smoke-test evidence
 
-Date: 2026-09-15; latest automated verification: 2026-09-18; live source acceptance: 2026-09-17 (Asia/Shanghai). Branch: `feature/batch-video-notes`.
+Date: 2026-09-15; latest automated verification: 2026-09-19; live source acceptance: 2026-09-17 (Asia/Shanghai). Branch: `feature/batch-video-notes`.
 Production-code baseline: `6cc6be320ff65b46630cf371453d976e5557e866`.
 The original Task 9 commit adds the integration test and this record. The notification follow-up below also changes frontend production code.
 
@@ -14,6 +14,53 @@ observations are recorded with their limits. A fully UI-driven creation workflow
 and packaged Tauri exit/reopen acceptance remain open; source-process evidence
 does not establish packaged desktop lifecycle behavior. Earlier dated sections
 retain their historical test results and pre-live-run acceptance status.
+
+## Scheduler and provider identity follow-up — 2026-09-19
+
+Starting HEAD: `f886939`. Scheduler ownership now reads the actual main database
+filename using `PRAGMA database_list`, then resolves its canonical filesystem
+path before acquiring the adjacent lock. Ordinary relative SQLite URLs retain
+the engine's creation-directory meaning after a later working-directory change;
+absolute Windows paths remain supported. SQLite URI forms (`file:` or a `uri`
+query option), in-memory databases, and remote database backends fail clearly
+before recovery or claiming jobs. Startup failure still releases ownership.
+
+Generation identity now includes the effective resolved provider endpoint,
+provider type, adapter and generation temperature. One execution-time provider
+snapshot supplies the client and all transcript/summary/final identities. GPT
+partial checkpoints use the same endpoint normalization. Endpoint/type changes
+under an unchanged provider ID and model invalidate saved output; equivalent
+endpoints and credential rotation reuse it. Endpoint normalization preserves
+the installed SDK's escaped-path and query behavior, including its environment
+fallback. Nonsecret query parameters retain their raw escape bytes, repeated
+parameter order, and bare-versus-empty value forms. API keys and URL credentials
+do not participate in the identity.
+
+| Follow-up check | Observed result | Exit |
+| --- | --- | --- |
+| Focused scheduler/artifact suites | 125 passed, 60.83s | 0 |
+| Complete backend suite (`pytest tests -q --tb=short`) | 285 passed, 3 subtests passed, 78.82s | 0 |
+| Standalone recovery integration | 1 passed, 10.72s | 0 |
+| Whitespace check (`git diff --check`) | No errors | 0 |
+
+The 27 added regression cases include cross-process start/recovery/claim attempts
+through absolute, relative-before-chdir and URI URLs; unsupported SQLite modes;
+provider endpoint/type/default changes; key rotation; a provider change during
+client construction; and repeated/escaped query parameter semantics.
+Three additional red cases reproduced raw-query collisions before decoding
+nonsecret values was removed. Red runs reproduced the original wrong-directory
+ownership bypass and stale endpoint cache reuse. A snapshot-handoff mutation
+also reproduced inconsistent client/transcript/final configuration before the
+handoff was restored. Costly model/media boundaries remain offline fixtures.
+
+No database migration or request/response schema change is required. The artifact
+envelope remains version 2, while generation identity advances to version 3.
+Older unfinished caches do not match and may regenerate once. Existing database
+SUCCESS jobs and readable historical notes are unchanged. Convert unsupported
+SQLite URI configurations to ordinary file-backed SQLite URLs before startup;
+do not remove a live scheduler's lock file. Frontend checks were not repeated
+because the router schemas and frontend source are unchanged. Live source and
+packaged Tauri acceptance limits below remain unchanged.
 
 ## Final recovery/regeneration review fixes — 2026-09-18
 

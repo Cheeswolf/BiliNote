@@ -19,6 +19,7 @@ from app.exceptions.note import NoteError
 from app.services.note import NoteGenerator, logger
 from app.services.task_workspace import TaskWorkspace
 from app.services.note_artifacts import generation_signature, load_note_result, save_signed
+from app.services.provider import resolve_provider_config
 from app.models.notes_model import NoteResult
 from app.services.task_serial_executor import task_serial_executor
 from app.utils.response import ResponseWrapper as R
@@ -100,7 +101,7 @@ def save_note_to_file(task_id: str, note: NoteResult) -> Path:
 
 
 def _persist_prefetched_transcript(task_id: str, transcript: dict, workspace: Optional[TaskWorkspace] = None,
-                                   settings: Optional[dict] = None) -> None:
+                                   settings: Optional[dict] = None, *, signature: Optional[str] = None) -> None:
     """把客户端预取的字幕写到 NoteGenerator 期望的转写缓存文件里。
 
     NoteGenerator.generate 会优先读 <task_id>_transcript.json，命中即跳过 download_subtitles
@@ -130,7 +131,7 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict, workspace: Op
     target = workspace.transcript if workspace else Path(NOTE_OUTPUT_DIR) / f"{task_id}_transcript.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     if settings is not None:
-        save_signed(target, payload, generation_signature({**settings, 'task_id': task_id}))
+        save_signed(target, payload, signature or generation_signature({**settings, 'task_id': task_id}))
     else:
         with open(target, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -166,10 +167,11 @@ def execute_note_job(
         generator = NoteGenerator()
         if not request.model_name or not request.provider_id:
             raise HTTPException(status_code=400, detail="请选择模型和提供者")
-        signature = generation_signature(request.model_dump(mode='json'))
+        provider_config = resolve_provider_config(request.provider_id)
+        signature = generation_signature(request.model_dump(mode='json'), provider_config=provider_config)
         if request.prefetched_transcript:
             _persist_prefetched_transcript(task_id, request.prefetched_transcript, workspace,
-                                          request.model_dump(mode='json'))
+                                          request.model_dump(mode='json'), signature=signature)
         note = load_note_result(workspace, signature) if workspace is not None else None
         note = note or generator.generate(
             video_url=request.video_url, platform=request.platform, quality=request.quality,
@@ -177,7 +179,7 @@ def execute_note_job(
             link=request.link, _format=request.format, style=request.style, extras=request.extras,
             screenshot=request.screenshot, video_understanding=request.video_understanding,
             video_interval=request.video_interval, grid_size=request.grid_size,
-            workspace=workspace, status_callback=report,
+            workspace=workspace, status_callback=report, provider_config=provider_config,
         )
         if not note or not note.markdown:
             raise RuntimeError("Note generation returned no markdown")

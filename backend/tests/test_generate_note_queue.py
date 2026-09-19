@@ -42,6 +42,10 @@ def test_mobile_youtube_preview_url_is_accepted_by_execution(path):
 
 @pytest.fixture
 def api(tmp_path, monkeypatch):
+    from app.services.provider import ProviderService
+    monkeypatch.setattr(ProviderService, 'get_provider_by_id', lambda provider_id: {
+        'id': provider_id, 'name': 'Fixture', 'type': 'custom',
+        'api_key': 'offline-key', 'base_url': 'https://fixture.example/v1'})
     monkeypatch.chdir(tmp_path)
     engine = create_engine(f"sqlite:///{tmp_path / 'queue.db'}", connect_args={'check_same_thread': False})
     Base.metadata.create_all(engine)

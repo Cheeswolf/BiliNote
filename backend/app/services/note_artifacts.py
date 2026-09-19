@@ -15,6 +15,7 @@ from app.models.notes_model import NoteResult
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.gpt.prompt_builder import generate_base_prompt
 from app.gpt.prompt import MERGE_PROMPT
+from app.gpt.provider_identity import provider_identity
 
 
 def digest(value) -> str:
@@ -22,7 +23,10 @@ def digest(value) -> str:
         separators=(',', ':'), default=str).encode('utf-8')).hexdigest()
 
 
-def generation_signature(settings: dict) -> str:
+def generation_signature(settings: dict, *, provider_config: dict | None = None) -> str:
+    if provider_config is None:
+        from app.services.provider import resolve_provider_config
+        provider_config = resolve_provider_config(settings.get('provider_id'))
     defaults = dict(quality='medium', model_name=None, provider_id=None, link=False,
         screenshot=False, format=[], style=None, extras=None, video_understanding=False,
         video_interval=0, grid_size=[], language=None)
@@ -48,8 +52,9 @@ def generation_signature(settings: dict) -> str:
         _format=options['format'], style=options['style'], extras=options['extras']),
         'merge': MERGE_PROMPT})
     from app.services.transcriber_config_manager import TranscriberConfigManager
-    return digest(dict(version=2, task_id=settings.get('task_id'), source=source,
+    return digest(dict(version=3, task_id=settings.get('task_id'), source=source,
         platform=settings.get('platform'), options=options, prompt=prompt_revision,
+        provider=provider_identity(provider_config),
         transcriber=TranscriberConfigManager().get_config(),
         request_bytes=os.getenv('OPENAI_MAX_REQUEST_BYTES', str(45 * 1024 * 1024))))
 

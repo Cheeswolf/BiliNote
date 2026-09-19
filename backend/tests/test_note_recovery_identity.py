@@ -86,7 +86,7 @@ def test_completed_gpt_checkpoint_survives_crash_before_summary_write(tmp_path):
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize('change', ['provider_id', 'generation_signature', 'link', 'screenshot'])
+@pytest.mark.parametrize('change', ['provider_id', 'provider_type', 'generation_signature', 'link', 'screenshot'])
 def test_partial_gpt_checkpoint_cannot_cross_request_identity(tmp_path, change):
     gpt, source, calls = offline_gpt(tmp_path)
     gpt._save_checkpoint('task', gpt._build_source_signature(source), ['wrong request answer'], 'summarize')
@@ -230,3 +230,130 @@ def test_failed_merge_resumes_saved_frontier_without_repeating_completed_group(t
     assert 'part-a' not in str(calls[1:])
     assert 'part-b' not in str(calls[1:])
     assert gpt._load_checkpoint('task', signature)['phase'] == 'complete'
+
+
+@pytest.mark.parametrize('artifact', ['summary', 'final'])
+@pytest.mark.parametrize('changed_config', [
+    {'base_url': 'https://second.example/v1'}, {'type': 'other-provider-type'},
+])
+def test_effective_provider_change_invalidates_saved_generation(pipeline, tmp_path, monkeypatch, artifact, changed_config):
+    from app.routers import note as router
+    provider = {'id': 'provider', 'name': 'Fixture', 'type': 'custom',
+                'api_key': 'private-key', 'base_url': 'https://first.example/v1'}
+    monkeypatch.setattr(note_service.ProviderService, 'get_provider_by_id', lambda _: dict(provider))
+    workspace = workspace_for('provider-change', tmp_path)
+    request = router.VideoRequest(video_url='video', platform='local', quality='medium',
+        task_id=workspace.task_id, model_name='model', provider_id='provider')
+    router.execute_note_job(request, workspace=workspace)
+    first_signature = json.loads(workspace.result.read_text())['_cache']['signature']
+    if artifact == 'summary':
+        workspace.result.unlink()
+    provider.update(changed_config)
+    pipeline.gpt.summarize = lambda source: pipeline.sources.append(source) or '# New endpoint result'
+    result_path = router.execute_note_job(request, workspace=workspace)
+    result = json.loads(result_path.read_text())
+    assert result['markdown'].endswith('# New endpoint result')
+    assert len(pipeline.sources) == 2
+    assert result['_cache']['signature'] != first_signature
+    assert json.loads(workspace.transcript.read_text())['_cache']['signature'] == result['_cache']['signature']
+
+
+def test_provider_fingerprint_resolves_default_endpoint_and_ignores_credentials(tmp_path, monkeypatch):
+    from app.services.note_artifacts import generation_signature
+    provider = {'id': 'provider', 'name': 'Fixture', 'type': 'custom',
+                'api_key': 'private-key', 'base_url': None}
+    monkeypatch.setattr(note_service.ProviderService, 'get_provider_by_id', lambda _: dict(provider))
+    settings = {'video_url': 'video', 'platform': 'local', 'provider_id': 'provider', 'model_name': 'model'}
+    monkeypatch.setenv('OPENAI_BASE_URL', 'https://FIRST.example:443/v1/')
+    first = generation_signature(settings)
+    monkeypatch.setenv('OPENAI_BASE_URL', 'https://second.example/v1')
+    assert generation_signature(settings) != first
+    provider.update(base_url='https://first.example/v1', api_key='rotated-private-key')
+    assert generation_signature(settings) == first
+
+
+def test_equivalent_endpoint_and_rotated_key_reuse_final(pipeline, tmp_path, monkeypatch):
+    from app.routers import note as router
+    provider = {'id': 'provider', 'name': 'Fixture', 'type': 'custom',
+                'api_key': 'private-key', 'base_url': 'https://FIRST.example:443/v1'}
+    monkeypatch.setattr(note_service.ProviderService, 'get_provider_by_id', lambda _: dict(provider))
+    workspace = workspace_for('provider-unchanged', tmp_path)
+    request = router.VideoRequest(video_url='video', platform='local', quality='medium',
+        task_id=workspace.task_id, model_name='model', provider_id='provider')
+    router.execute_note_job(request, workspace=workspace)
+    provider.update(base_url='https://first.example/v1/', api_key='rotated-private-key')
+    pipeline.gpt.summarize = lambda source: pytest.fail('equivalent endpoint repeated GPT')
+    router.execute_note_job(request, workspace=workspace)
+    assert len(pipeline.sources) == 1
+
+
+def test_partial_fingerprint_normalizes_endpoint_and_excludes_url_credentials(tmp_path):
+    gpt, source, calls = offline_gpt(tmp_path)
+    gpt.client.base_url = 'https://user:first-secret@FIRST.example:443/v1?api_key=private-key'
+    first = gpt._build_source_signature(source)
+    gpt.client.base_url = 'https://user:rotated-secret@first.example/v1/?api_key=rotated-key'
+    assert gpt._build_source_signature(source) == first
+    gpt.client.base_url = 'https://second.example/v1/'
+    assert gpt._build_source_signature(source) != first
+
+
+@pytest.mark.parametrize('endpoint', ['https://fixture.example/tenant%2Fname/v1',
+                                     'https://fixture.example/v1?api-version=2025'])
+def test_resolved_endpoint_preserves_sdk_url_semantics(endpoint):
+    from openai import OpenAI
+    from app.gpt.provider_identity import resolve_base_url
+    with OpenAI(api_key='offline-key', base_url=endpoint) as client:
+        assert resolve_base_url(endpoint) == str(client.base_url)
+
+
+def test_one_provider_snapshot_binds_actual_client_and_all_artifacts(pipeline, tmp_path, monkeypatch):
+    from app.routers import note as router
+    lookups, client_endpoints = [], []
+    def changing_provider(provider_id):
+        lookups.append(provider_id)
+        return {'id': provider_id, 'name': 'Fixture', 'type': 'custom', 'api_key': 'private-key',
+                'base_url': f'https://endpoint-{len(lookups)}.example/v1'}
+    monkeypatch.setattr(note_service.ProviderService, 'get_provider_by_id', changing_provider)
+    monkeypatch.setattr(note_service.NoteGenerator, '_get_gpt', pipeline.original_get_gpt)
+    def offline_client(config):
+        client_endpoints.append(config.base_url)
+        pipeline.gpt.summarize = lambda source: '# ' + config.base_url
+        return pipeline.gpt
+    monkeypatch.setattr(note_service.GPTFactory, 'from_config', staticmethod(offline_client))
+    workspace = workspace_for('provider-snapshot', tmp_path)
+    request = router.VideoRequest(video_url='video', platform='local', quality='medium',
+        task_id=workspace.task_id, model_name='model', provider_id='provider',
+        prefetched_transcript={'language': 'en', 'full_text': 'lesson',
+            'segments': [{'start': 0, 'end': 1, 'text': 'lesson'}]})
+    router.execute_note_job(request, workspace=workspace)
+    assert lookups == ['provider']
+    assert client_endpoints == ['https://endpoint-1.example/v1/']
+    result = json.loads(workspace.result.read_text())
+    assert result['markdown'].endswith('# https://endpoint-1.example/v1/')
+    assert json.loads(workspace.transcript.read_text())['_cache']['signature'] == result['_cache']['signature']
+    assert all('private-key' not in path.read_text() for path in workspace.root.glob('*.json'))
+
+
+def test_endpoint_query_parameter_order_is_part_of_generation_identity():
+    from app.services.note_artifacts import generation_signature
+    settings = {'video_url': 'video', 'platform': 'local', 'provider_id': 'provider', 'model_name': 'model'}
+    first = generation_signature(settings, provider_config={
+        'type': 'custom', 'base_url': 'https://fixture.example/v1/?deployment=a/&deployment=b/'})
+    reordered = generation_signature(settings, provider_config={
+        'type': 'custom', 'base_url': 'https://fixture.example/v1/?deployment=b/&deployment=a/'})
+    assert reordered != first  # Gateways can use the first or last repeated value.
+
+
+@pytest.mark.parametrize('first_query, second_query', [
+    ('deployment=%FF/', 'deployment=%FE/'),
+    ('deployment=a%2Fb/', 'deployment=a/b/'),
+    ('flag&deployment=a/', 'flag=&deployment=a/'),
+])
+def test_endpoint_query_escape_semantics_do_not_collide(first_query, second_query):
+    from app.services.note_artifacts import generation_signature
+    settings = {'video_url': 'video', 'platform': 'local', 'provider_id': 'provider', 'model_name': 'model'}
+    first = generation_signature(settings, provider_config={
+        'type': 'custom', 'base_url': 'https://fixture.example/v1/?' + first_query})
+    second = generation_signature(settings, provider_config={
+        'type': 'custom', 'base_url': 'https://fixture.example/v1/?' + second_query})
+    assert second != first
