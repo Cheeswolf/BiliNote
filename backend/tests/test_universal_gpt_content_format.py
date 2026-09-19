@@ -11,9 +11,13 @@ import unittest
 
 
 def _install_stubs():
+    root = pathlib.Path(__file__).resolve().parents[1]
     app_mod = types.ModuleType("app")
     gpt_pkg = types.ModuleType("app.gpt")
     models_pkg = types.ModuleType("app.models")
+    app_mod.__path__ = [str(root / "app")]
+    gpt_pkg.__path__ = [str(root / "app" / "gpt")]
+    models_pkg.__path__ = [str(root / "app" / "models")]
 
     base_mod = types.ModuleType("app.gpt.base")
 

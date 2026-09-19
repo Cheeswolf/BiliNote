@@ -22,12 +22,14 @@ def provider_identity(provider: dict | None) -> dict:
                      b'secret', b'signature', b'credential'}
     # Preserve raw values, escaping, blanks and ordering: gateways may interpret
     # these differently. Decode only names to recognize encoded credentials.
-    query = b'&'.join(part for part in url.query.split(b'&')
-                      if not set(unquote_to_bytes(part.partition(b'=')[0])
-                                 .lower().replace(b'-', b'_').split(b'_')) & secret_fields)
+    parts = []
+    for part in url.query.split(b'&'):
+        name, separator, value = part.partition(b'=')
+        tokens = set(unquote_to_bytes(name).lower().replace(b'-', b'_').split(b'_'))
+        # Replace only the value. Removing a credential parameter would alias
+        # distinct paths/queries (including the SDK's appended raw-path slash).
+        parts.append(name + separator + b'REDACTED' if separator and tokens & secret_fields else part)
     endpoint = url.copy_with(username=None, password=None, fragment=None,
-                             query=query or None)
-    if not query and not endpoint.raw_path.endswith(b'/'):
-        endpoint = endpoint.copy_with(raw_path=endpoint.raw_path + b'/')
+                             query=b'&'.join(parts) if url.query else None)
     return {'base_url': str(endpoint), 'type': provider.get('type'),
             'adapter': 'openai-compatible', 'temperature': 0.7}

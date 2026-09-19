@@ -239,7 +239,7 @@ def test_context_preparation_failure_is_terminal(sessions):
 
 
 @pytest.mark.parametrize('operation', ['start', 'recover_interrupted_jobs', 'run_once'])
-@pytest.mark.parametrize('database_form', ['absolute', 'relative-before-chdir', 'sqlite-uri'])
+@pytest.mark.parametrize('database_form', ['absolute', 'relative-before-chdir', 'sqlite-uri', 'hardlink'])
 def test_second_process_cannot_recover_or_claim_live_owner_jobs(sessions, tmp_path, operation, database_form):
     queue_module = load_queue_module()
     entered, release = threading.Event(), threading.Event()
@@ -279,10 +279,15 @@ finally:
     if queue is not None:
         queue.stop()
 '''
+    database_path = tmp_path / 'queue.db'
+    if database_form == 'hardlink':
+        database_path = tmp_path / 'hardlink.db'
+        os.link(tmp_path / 'queue.db', database_path)
+        assert database_path.stat().st_nlink == 2
     try:
         elsewhere = tmp_path / 'other-working-directory'
         elsewhere.mkdir()
-        child = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'queue.db'),
+        child = subprocess.run([sys.executable, '-c', script, str(database_path),
             operation, str(tmp_path / 'wrong-runner'), database_form], cwd=elsewhere,
             env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1])),
             capture_output=True, text=True, timeout=35,
@@ -291,6 +296,8 @@ finally:
         assert job_states(sessions, ids) == [('PARSING', None), ('PENDING', None)]
         assert not (tmp_path / 'wrong-runner').exists()
     finally:
+        if database_form == 'hardlink':
+            database_path.unlink()
         # Stop waits for the current job; stop before releasing it so the second
         # pending item cannot be claimed by the owner during test cleanup.
         stopper = threading.Thread(target=owner.stop)
@@ -387,3 +394,40 @@ def test_relative_database_lock_uses_engine_creation_directory_without_prior_con
         assert not (elsewhere / 'queue.db').exists()
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize('operation', ['recover_interrupted_jobs', 'run_once'])
+@pytest.mark.parametrize('link_timing', ['before-acquire', 'during-acquire', 'already-owned'])
+def test_hardlink_added_after_construction_cannot_recover_or_claim(sessions, tmp_path, monkeypatch,
+                                                                 operation, link_timing):
+    queue_module = load_queue_module()
+    _, ids = add_batch(sessions, statuses=('PARSING', 'PENDING'))
+    seen = []
+    service = queue_module.NoteQueueService(sessions, seen.append)
+    alias = tmp_path / 'hardlink.db'
+    if link_timing == 'already-owned':
+        service._ownership.acquire()
+    if link_timing == 'during-acquire':
+        original_open = Path.open
+        def open_then_link(path, *args, **kwargs):
+            stream = original_open(path, *args, **kwargs)
+            if path == service._ownership.path:
+                os.link(tmp_path / 'queue.db', alias)
+            return stream
+        monkeypatch.setattr(Path, 'open', open_then_link)
+    else:
+        os.link(tmp_path / 'queue.db', alias)
+    try:
+        with pytest.raises(RuntimeError, match='SQLite.*hardlink'):
+            getattr(service, operation)()
+        assert job_states(sessions, ids) == [('PARSING', None), ('PENDING', None)]
+        assert seen == []
+        if link_timing != 'already-owned':
+            assert service._ownership.stream is None
+    finally:
+        service.stop()
+        alias.unlink()
+    # Rejection must leave the normal database usable and release any OS lock.
+    monkeypatch.undo()
+    queue_module.NoteQueueService(sessions, seen.append).recover_interrupted_jobs()
+    assert job_states(sessions, ids) == [('INTERRUPTED', None), ('PENDING', None)]

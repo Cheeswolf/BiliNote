@@ -53,10 +53,20 @@ class SchedulerOwnership:
             if not filename:
                 raise RuntimeError('Note queue scheduler requires a file-backed SQLite database')
             canonical = os.path.normcase(str(Path(filename).resolve()))
+            self.database = Path(canonical)
+            self._validate_database()
             self.path = Path(canonical + '.note-queue.lock')
         self.stream = None
 
+    def _validate_database(self):
+        # Path canonicalization cannot unify hardlinks. SQLite journal paths
+        # also differ across those aliases, so reject them rather than lock one.
+        if self.database.stat().st_nlink > 1:
+            raise RuntimeError('Note queue scheduler cannot use a SQLite database with hardlinks; '
+                               'remove the additional links before starting the scheduler')
+
     def acquire(self):
+        self._validate_database()
         if self.stream is not None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,9 +82,13 @@ class SchedulerOwnership:
             else:
                 import fcntl
                 fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._validate_database()
         except OSError as exc:
             stream.close()
             raise RuntimeError('A note queue scheduler is already running for this database') from exc
+        except BaseException:
+            stream.close()
+            raise
         self.stream = stream
 
     def release(self):
@@ -112,8 +126,7 @@ class NoteQueueService:
     @contextmanager
     def _owned(self):
         temporary = self._ownership.stream is None
-        if temporary:
-            self._ownership.acquire()
+        self._ownership.acquire()
         try:
             yield
         finally:

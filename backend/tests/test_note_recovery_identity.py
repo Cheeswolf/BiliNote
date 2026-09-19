@@ -291,7 +291,7 @@ def test_partial_fingerprint_normalizes_endpoint_and_excludes_url_credentials(tm
     gpt, source, calls = offline_gpt(tmp_path)
     gpt.client.base_url = 'https://user:first-secret@FIRST.example:443/v1?api_key=private-key'
     first = gpt._build_source_signature(source)
-    gpt.client.base_url = 'https://user:rotated-secret@first.example/v1/?api_key=rotated-key'
+    gpt.client.base_url = 'https://user:rotated-secret@first.example/v1?api_key=rotated-key'
     assert gpt._build_source_signature(source) == first
     gpt.client.base_url = 'https://second.example/v1/'
     assert gpt._build_source_signature(source) != first
