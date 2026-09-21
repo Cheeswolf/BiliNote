@@ -3,6 +3,10 @@ import { Link, NavLink } from 'react-router-dom'
 import logo from '@/assets/icon.svg'
 
 export default function BatchShell({ children, actions }: { children: ReactNode; actions?: ReactNode }) {
+  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+  // The fixed desktop health button occupies the bottom-right corner. At xl,
+  // the centered max-w-6xl container already leaves enough room outside it.
+  const actionPadding = isTauri ? 'pr-24 xl:pr-8' : 'pr-5 sm:pr-8'
   return (
     <div className="flex h-dvh min-h-0 flex-col overflow-hidden bg-neutral-50 text-neutral-900">
       <header className="shrink-0 border-b bg-white">
@@ -21,7 +25,7 @@ export default function BatchShell({ children, actions }: { children: ReactNode;
         <div className="mx-auto w-full max-w-6xl space-y-6 px-5 py-8 sm:px-8">{children}</div>
       </main>
       {actions && <footer aria-label="创建操作" className="shrink-0 border-t bg-white">
-        <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-end gap-3 px-5 py-3 sm:px-8">{actions}</div>
+        <div className={`mx-auto flex w-full max-w-6xl flex-wrap items-center justify-end gap-3 py-3 pl-5 sm:pl-8 ${actionPadding}`}>{actions}</div>
       </footer>}
     </div>
   )

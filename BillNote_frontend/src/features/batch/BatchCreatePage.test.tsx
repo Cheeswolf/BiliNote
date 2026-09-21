@@ -24,7 +24,7 @@ vi.mock('@/services/model', () => ({
 }))
 vi.mock('@/services/note', () => ({ get_task_status: vi.fn(), generateNote: vi.fn(), delete_task: vi.fn() }))
 const originalAdapter = request.defaults.adapter
-afterEach(() => { request.defaults.adapter = originalAdapter })
+afterEach(() => { request.defaults.adapter = originalAdapter; vi.unstubAllGlobals() })
 const item = (n: number): BatchPreviewItem => ({
   original_url: 'https://b23.tv/a', normalized_url: 'https://www.bilibili.com/video/BV1test?p=' + n,
   platform: 'bilibili', resource_key: 'bilibili:BV1test:p' + n, title: '课程 · P' + n,
@@ -59,7 +59,8 @@ const parse = async () => {
   await userEvent.click(screen.getByRole('button', { name: '解析链接' }))
   await screen.findByText('课程 · P1')
 }
-it('keeps actions outside the scrollable content for 100 parsed parts and long settings', async () => {
+it.each([false, true])('keeps actions outside scrollable content and clear of the desktop health overlay (Tauri: %s)', async isTauri => {
+  if (isTauri) vi.stubGlobal('__TAURI_INTERNALS__', {})
   vi.mocked(previewBatch).mockResolvedValue({ items: Array.from({ length: 100 }, (_, i) => item(i + 1)) })
   mount()
   await parse()
@@ -71,6 +72,9 @@ it('keeps actions outside the scrollable content for 100 parsed parts and long s
   expect(main.parentElement?.classList.contains('flex-col')).toBe(true)
   const actions = screen.getByRole('contentinfo', { name: '创建操作' })
   expect(actions.classList.contains('shrink-0')).toBe(true)
+  const actionRow = actions.firstElementChild!
+  expect(actionRow.classList.contains('pr-24')).toBe(isTauri)
+  expect(actionRow.classList.contains('xl:pr-8')).toBe(isTauri)
   expect(main.contains(actions)).toBe(false)
   expect(main.contains(screen.getByRole('checkbox', { name: '选择 课程 · P100' }))).toBe(true)
   const next = screen.getByRole('button', { name: '下一步' })
