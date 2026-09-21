@@ -88,7 +88,19 @@ export default function BatchCreatePage() {
     } finally { if (mounted.current) setBusy(false) }
   }
   return (
-    <BatchShell>
+    <BatchShell key={step} actions={step === 1 ? (
+      <>
+        <p className="mr-auto text-sm text-muted-foreground">已选择 {selected.length} / 100 条</p>
+        <Button disabled={!selectionValid || busy} onClick={() => { setStep(2); setError(null) }}>下一步<ArrowRight className="h-4 w-4" /></Button>
+      </>
+    ) : (
+      <>
+        <Button type="button" variant="outline" disabled={submitted} onClick={() => setStep(1)}>上一步</Button>
+        <Button type="submit" form="batch-create-form" disabled={busy || (!submitted && !canSubmit)}>
+          {busy && <Loader2 className="h-4 w-4 animate-spin" />}{submitted && error ? '重试提交' : '开始生成 ' + selected.length + ' 条笔记'}
+        </Button>
+      </>
+    )}>
       <Link to="/batch" className="inline-flex items-center gap-2 text-sm text-muted-foreground"><ArrowLeft className="h-4 w-4" />批量任务中心</Link>
       <div><h1 className="text-2xl font-semibold">新建批量任务</h1><p className="mt-2 text-sm text-muted-foreground">选择视频，统一设置，按顺序逐条生成独立笔记。</p></div>
       <ol className="flex gap-6 border-b pb-4 text-sm" aria-label="创建步骤">
@@ -109,12 +121,9 @@ export default function BatchCreatePage() {
             </div>
           </div>
           {!!rows.length && <BatchVideoPicker rows={rows} onChange={setRows} />}
-          <div className="flex justify-end">
-            <Button disabled={!selectionValid || busy} onClick={() => { setStep(2); setError(null) }}>下一步<ArrowRight className="h-4 w-4" /></Button>
-          </div>
         </div>
       ) : (
-        <form className="grid items-start gap-6 lg:grid-cols-[1fr_18rem]" onSubmit={e => { e.preventDefault(); void submit() }}>
+        <form id="batch-create-form" className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_18rem]" onSubmit={e => { e.preventDefault(); void submit() }}>
           <div className="space-y-6 rounded-xl border bg-white p-5 sm:p-6">
             <label className="block space-y-2 text-sm font-medium">批次名称
               <Input value={name} maxLength={200} required disabled={submitted} onChange={e => setName(e.target.value)} />
@@ -125,10 +134,6 @@ export default function BatchCreatePage() {
           <aside className="space-y-5 rounded-xl border bg-white p-5 lg:sticky lg:top-6">
             <div><p className="text-sm text-muted-foreground">本次生成</p><p className="mt-1 text-3xl font-semibold">{selected.length}<span className="ml-2 text-sm font-normal">条笔记</span></p></div>
             <p className="text-sm leading-6 text-muted-foreground">每个视频生成一篇笔记，使用相同设置并按选择列表顺序执行。单条失败会继续下一条。</p>
-            <Button type="submit" className="w-full" disabled={busy || (!submitted && !canSubmit)}>
-              {busy && <Loader2 className="h-4 w-4 animate-spin" />}{submitted && error ? '重试提交' : '开始生成 ' + selected.length + ' 条笔记'}
-            </Button>
-            <Button type="button" className="w-full" variant="outline" disabled={submitted} onClick={() => setStep(1)}>上一步</Button>
           </aside>
         </form>
       )}
