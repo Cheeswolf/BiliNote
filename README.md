@@ -63,6 +63,24 @@
 >
 > ---
 
+### 功能演示
+
+#### 1. 创建批量任务
+
+![创建批量任务](docs/screenshots/batch/01-create-batch.png)
+
+#### 2. 查看批量处理进度
+
+![批量处理进度](docs/screenshots/batch/02-batch-progress.png)
+
+#### 3. 查看批次详情
+
+![批次详情](docs/screenshots/batch/03-batch-detail.png)
+
+#### 4. 查看生成结果
+
+![生成结果](docs/screenshots/batch/04-generated-note.png)
+
 ## ✨ 项目简介
 
 BiliNote 是一个开源的 AI 视频笔记助手，支持通过哔哩哔哩、YouTube、抖音等视频链接，自动提取内容并生成结构清晰、重点明确的 Markdown 格式笔记。支持插入截图、原片跳转、AI 问答等功能。
